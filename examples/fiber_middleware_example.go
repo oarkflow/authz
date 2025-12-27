@@ -11,15 +11,16 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/stores"
 )
 
 func main() {
 	ctx := context.Background()
 
-	policyStore := authz.NewMemoryPolicyStore()
-	roleStore := authz.NewMemoryRoleStore()
-	aclStore := authz.NewMemoryACLStore()
-	auditStore := authz.NewMemoryAuditStore()
+	policyStore := stores.NewMemoryPolicyStore()
+	roleStore := stores.NewMemoryRoleStore()
+	aclStore := stores.NewMemoryACLStore()
+	auditStore := stores.NewMemoryAuditStore()
 
 	eng := authz.NewEngine(policyStore, roleStore, aclStore, auditStore)
 

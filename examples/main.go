@@ -6,16 +6,17 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/stores"
 )
 
 func mai1n() {
 	ctx := context.Background()
 
 	// Initialize stores
-	policyStore := authz.NewMemoryPolicyStore()
-	roleStore := authz.NewMemoryRoleStore()
-	aclStore := authz.NewMemoryACLStore()
-	auditStore := authz.NewMemoryAuditStore()
+	policyStore := stores.NewMemoryPolicyStore()
+	roleStore := stores.NewMemoryRoleStore()
+	aclStore := stores.NewMemoryACLStore()
+	auditStore := stores.NewMemoryAuditStore()
 
 	// Create engine
 	engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore)

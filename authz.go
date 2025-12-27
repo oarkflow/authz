@@ -17,7 +17,10 @@ import (
 
 	"github.com/oarkflow/authz/utils"
 
-	phlog "github.com/phuslu/log"
+	"log"
+
+	ristretto "github.com/dgraph-io/ristretto"
+	phlog "github.com/oarkflow/log"
 )
 
 // ============================================================================
@@ -551,6 +554,13 @@ type AuditStore interface {
 	GetAccessLog(ctx context.Context, filter AuditFilter) ([]*AuditEntry, error)
 }
 
+// RoleMembershipStore persists assignments of roles to subjects
+type RoleMembershipStore interface {
+	AssignRole(ctx context.Context, subjectID, roleID string) error
+	RevokeRole(ctx context.Context, subjectID, roleID string) error
+	ListRoles(ctx context.Context, subjectID string) ([]string, error)
+}
+
 // AuditEntry represents an authorization decision log
 type AuditEntry struct {
 	ID        string         `json:"id"`
@@ -571,256 +581,6 @@ type AuditFilter struct {
 	EndTime    time.Time
 	Limit      int
 }
-
-// ============================================================================
-// IN-MEMORY STORES (For demonstration)
-// ============================================================================
-
-type MemoryPolicyStore struct {
-	mu        sync.RWMutex
-	policies  map[string]*Policy
-	histories map[string][]*Policy
-}
-
-func NewMemoryPolicyStore() *MemoryPolicyStore {
-	return &MemoryPolicyStore{
-		policies:  make(map[string]*Policy),
-		histories: make(map[string][]*Policy),
-	}
-}
-
-func (s *MemoryPolicyStore) CreatePolicy(ctx context.Context, p *Policy) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p.CreatedAt = time.Now()
-	p.UpdatedAt = p.CreatedAt
-	s.policies[p.ID] = p
-	return nil
-}
-
-func (s *MemoryPolicyStore) UpdatePolicy(ctx context.Context, p *Policy) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	old, ok := s.policies[p.ID]
-	if ok {
-		// store a copy in history
-		cop := *old
-		s.histories[p.ID] = append(s.histories[p.ID], &cop)
-	}
-	p.UpdatedAt = time.Now()
-	p.Version++
-	s.policies[p.ID] = p
-	return nil
-}
-
-func (s *MemoryPolicyStore) GetPolicyHistory(ctx context.Context, id string) ([]*Policy, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	h, ok := s.histories[id]
-	if !ok {
-		return nil, fmt.Errorf("no history for policy %s", id)
-	}
-	return h, nil
-}
-
-func (s *MemoryPolicyStore) DeletePolicy(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.policies, id)
-	return nil
-}
-
-func (s *MemoryPolicyStore) GetPolicy(ctx context.Context, id string) (*Policy, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	p, ok := s.policies[id]
-	if !ok {
-		return nil, fmt.Errorf("policy not found: %s", id)
-	}
-	return p, nil
-}
-
-func (s *MemoryPolicyStore) ListPolicies(ctx context.Context, tenantID string) ([]*Policy, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]*Policy, 0)
-	for _, p := range s.policies {
-		if p.TenantID == tenantID || p.TenantID == "" {
-			result = append(result, p)
-		}
-	}
-	return result, nil
-}
-
-type MemoryRoleStore struct {
-	mu    sync.RWMutex
-	roles map[string]*Role
-}
-
-func NewMemoryRoleStore() *MemoryRoleStore {
-	return &MemoryRoleStore{
-		roles: make(map[string]*Role),
-	}
-}
-
-func (s *MemoryRoleStore) CreateRole(ctx context.Context, r *Role) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r.CreatedAt = time.Now()
-	s.roles[r.ID] = r
-	return nil
-}
-
-func (s *MemoryRoleStore) UpdateRole(ctx context.Context, r *Role) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.roles[r.ID] = r
-	return nil
-}
-
-func (s *MemoryRoleStore) DeleteRole(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.roles, id)
-	return nil
-}
-
-func (s *MemoryRoleStore) GetRole(ctx context.Context, id string) (*Role, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	r, ok := s.roles[id]
-	if !ok {
-		return nil, fmt.Errorf("role not found: %s", id)
-	}
-	return r, nil
-}
-
-func (s *MemoryRoleStore) ListRoles(ctx context.Context, tenantID string) ([]*Role, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]*Role, 0)
-	for _, r := range s.roles {
-		if r.TenantID == tenantID || r.TenantID == "" {
-			result = append(result, r)
-		}
-	}
-	return result, nil
-}
-
-type MemoryACLStore struct {
-	mu   sync.RWMutex
-	acls map[string]*ACL
-}
-
-func NewMemoryACLStore() *MemoryACLStore {
-	return &MemoryACLStore{
-		acls: make(map[string]*ACL),
-	}
-}
-
-func (s *MemoryACLStore) GrantACL(ctx context.Context, acl *ACL) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	acl.CreatedAt = time.Now()
-	s.acls[acl.ID] = acl
-	return nil
-}
-
-func (s *MemoryACLStore) RevokeACL(ctx context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.acls, id)
-	return nil
-}
-
-func (s *MemoryACLStore) ListACLsByResource(ctx context.Context, resourceID string) ([]*ACL, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]*ACL, 0)
-	for _, acl := range s.acls {
-		if acl.IsExpired() {
-			continue
-		}
-		// Support pattern-based ACL.ResourceID: exact match OR wildcard suffix: "document:*" OR prefix
-		if acl.ResourceID == resourceID {
-			result = append(result, acl)
-			continue
-		}
-		// wildcard suffix
-		for i, ch := range acl.ResourceID {
-			if ch == '*' {
-				prefix := acl.ResourceID[:i]
-				if len(resourceID) >= len(prefix) && resourceID[:len(prefix)] == prefix {
-					result = append(result, acl)
-				}
-				break
-			}
-		}
-	}
-	return result, nil
-}
-
-func (s *MemoryACLStore) ListACLsBySubject(ctx context.Context, subjectID string) ([]*ACL, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]*ACL, 0)
-	for _, acl := range s.acls {
-		if acl.SubjectID == subjectID && !acl.IsExpired() {
-			result = append(result, acl)
-		}
-	}
-	return result, nil
-}
-
-type MemoryAuditStore struct {
-	mu      sync.RWMutex
-	entries []*AuditEntry
-}
-
-func NewMemoryAuditStore() *MemoryAuditStore {
-	return &MemoryAuditStore{
-		entries: make([]*AuditEntry, 0),
-	}
-}
-
-func (s *MemoryAuditStore) LogDecision(ctx context.Context, entry *AuditEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.entries = append(s.entries, entry)
-	return nil
-}
-
-func (s *MemoryAuditStore) GetAccessLog(ctx context.Context, filter AuditFilter) ([]*AuditEntry, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	result := make([]*AuditEntry, 0)
-	for _, entry := range s.entries {
-		if filter.SubjectID != "" && entry.Subject.ID != filter.SubjectID {
-			continue
-		}
-		if filter.ResourceID != "" && entry.Resource.ID != filter.ResourceID {
-			continue
-		}
-		if filter.Action != "" && entry.Action != filter.Action {
-			continue
-		}
-		if !filter.StartTime.IsZero() && entry.Timestamp.Before(filter.StartTime) {
-			continue
-		}
-		if !filter.EndTime.IsZero() && entry.Timestamp.After(filter.EndTime) {
-			continue
-		}
-		result = append(result, entry)
-		if filter.Limit > 0 && len(result) >= filter.Limit {
-			break
-		}
-	}
-	return result, nil
-}
-
-// ============================================================================
-// POLICY INDEX (O(1) / O(log n) lookups)
-// ============================================================================
 
 // CompiledPredicate is a faster, precompiled predicate for a policy
 type CompiledPredicate func(*EvalContext) (bool, error)
@@ -996,9 +756,7 @@ func compileToBytecode(e Expr) *Bytecode {
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_EQ}, args: []interface{}{v.Field, v.Value}}
 	case *InExpr:
 		vals := make([]interface{}, len(v.Values))
-		for i := range v.Values {
-			vals[i] = v.Values[i]
-		}
+		copy(vals, v.Values)
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_IN}, args: []interface{}{v.Field, vals}}
 	case *GteExpr:
 		if rv, ok := v.Value.(string); ok && (rv == "action" || (len(rv) > 4 && (rv[:8] == "subject." || rv[:9] == "resource." || rv[:4] == "env."))) {
@@ -1328,21 +1086,39 @@ type AttributeProvider interface {
 }
 
 type Engine struct {
-	policyStore      PolicyStore
-	roleStore        RoleStore
-	aclStore         ACLStore
-	auditStore       AuditStore
-	policyIndex      *PolicyIndex
-	roleCache        sync.Map
-	decisionCache    map[DecisionKey]*DecisionCacheEntry
-	decisionCacheTTL time.Duration
-	attrProviders    []AttributeProvider
-	decisionCacheMu  sync.RWMutex
-	tenantResolver   TenantResolver
+	policyStore         PolicyStore
+	roleStore           RoleStore
+	aclStore            ACLStore
+	auditStore          AuditStore
+	policyIndex         *PolicyIndex
+	roleCache           sync.Map
+	decisionCache       map[DecisionKey]*DecisionCacheEntry
+	decisionCacheTTL    time.Duration
+	attrProviders       []AttributeProvider
+	roleMembershipStore RoleMembershipStore
+	// optional Ristretto cache for decisions
+	ristCache       *ristretto.Cache
+	decisionCacheMu sync.RWMutex
+	tenantResolver  TenantResolver
 	// pools for hot-path objects
 	evalCtxPool sync.Pool
 	// asynchronous audit channel to avoid per-request allocations
 	auditCh chan AuditEntry
+}
+
+type EngineOption func(*Engine) error
+
+func WithRistretto(numCounters int64, maxCost int64, bufferItems int64) EngineOption {
+	return func(e *Engine) error {
+		return e.ConfigureRistrettoDecisionCache(numCounters, maxCost, bufferItems)
+	}
+}
+
+func WithRoleMembershipStore(s RoleMembershipStore) EngineOption {
+	return func(e *Engine) error {
+		e.SetRoleMembershipStore(s)
+		return nil
+	}
 }
 
 func NewEngine(
@@ -1350,6 +1126,7 @@ func NewEngine(
 	roleStore RoleStore,
 	aclStore ACLStore,
 	auditStore AuditStore,
+	opts ...EngineOption,
 ) *Engine {
 	e := &Engine{
 		policyStore:      policyStore,
@@ -1372,7 +1149,19 @@ func NewEngine(
 			_ = e.auditStore.LogDecision(bg, &entry)
 		}
 	}()
+
+	// Apply options
+	for _, opt := range opts {
+		if err := opt(e); err != nil {
+			log.Printf("engine option error: %v", err)
+		}
+	}
+
 	return e
+}
+
+func (e *Engine) AuditStore() AuditStore {
+	return e.auditStore
 }
 
 // ReloadPolicies rebuilds the policy index
@@ -1487,6 +1276,23 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 			}
 		}
 	}
+
+	// If still no roles and a role membership store is configured, load roles from it
+	var _loadedRolesFromMembership bool
+	var _origRoles []string
+	if subject != nil && len(subject.Roles) == 0 && e.roleMembershipStore != nil {
+		if roles, err := e.roleMembershipStore.ListRoles(ctx, subject.ID); err == nil && len(roles) > 0 {
+			_origRoles = append([]string{}, subject.Roles...)
+			subject.Roles = append(subject.Roles, roles...)
+			_loadedRolesFromMembership = true
+		}
+	}
+	// ensure we restore original roles to avoid mutating caller's subject when we loaded from membership store
+	defer func() {
+		if _loadedRolesFromMembership && subject != nil {
+			subject.Roles = _origRoles
+		}
+	}()
 	// get pooled eval context to avoid per-request allocations
 	evalCtx := e.getEvalCtx()
 	evalCtx.Subject = subject
@@ -2307,8 +2113,17 @@ func (e *Engine) CreatePolicy(ctx context.Context, policy *Policy) error {
 	if err := e.ValidatePolicy(policy); err != nil {
 		return err
 	}
-	policy.Version = 1
+	// initialize metadata
+	if policy.Version == 0 {
+		policy.Version = 1
+	}
 	policy.Enabled = true
+	if policy.CreatedAt.IsZero() {
+		policy.CreatedAt = time.Now()
+	}
+	if policy.UpdatedAt.IsZero() {
+		policy.UpdatedAt = policy.CreatedAt
+	}
 	err := e.policyStore.CreatePolicy(ctx, policy)
 	if err == nil {
 		e.InvalidateDecisionCache()
@@ -2320,6 +2135,9 @@ func (e *Engine) UpdatePolicy(ctx context.Context, policy *Policy) error {
 	if err := e.ValidatePolicy(policy); err != nil {
 		return err
 	}
+	// bump version and updated timestamp
+	policy.Version++
+	policy.UpdatedAt = time.Now()
 	err := e.policyStore.UpdatePolicy(ctx, policy)
 	if err == nil {
 		e.InvalidateDecisionCache()
@@ -2459,7 +2277,25 @@ func (e *Engine) putEvalCtx(c *EvalContext) {
 	e.evalCtxPool.Put(c)
 }
 
+func decisionKeyToString(key DecisionKey) string {
+	return fmt.Sprintf("%s|%s|%s|%s|%s", key.TenantID, key.SubjectID, key.ResourceType, key.ResourceID, string(key.Action))
+}
+
 func (e *Engine) getDecisionFromCache(key DecisionKey) (*Decision, bool) {
+	// prefer Ristretto cache if configured
+	if e.ristCache != nil {
+		k := decisionKeyToString(key)
+		if v, ok := e.ristCache.Get(k); ok {
+			if entry, ok2 := v.(*DecisionCacheEntry); ok2 {
+				if time.Now().After(entry.ExpiresAt) {
+					return nil, false
+				}
+				return entry.Decision, true
+			}
+		}
+		return nil, false
+	}
+
 	e.decisionCacheMu.RLock()
 	entry, ok := e.decisionCache[key]
 	e.decisionCacheMu.RUnlock()
@@ -2491,6 +2327,15 @@ func (e *Engine) setDecisionInCache(key DecisionKey, dec *Decision) {
 	copyDec := *dec
 	copyDec.Trace = []string{"(cached)"}
 	entry := &DecisionCacheEntry{Decision: &copyDec, ExpiresAt: time.Now().Add(e.decisionCacheTTL)}
+
+	if e.ristCache != nil {
+		// Insert into ristretto cache (cost 1) using string key
+		k := decisionKeyToString(key)
+		_ = e.ristCache.Set(k, entry, 1)
+		// Wait for the value to be ingested to make reads reliable for immediate queries
+		e.ristCache.Wait()
+		return
+	}
 	e.decisionCacheMu.Lock()
 	e.decisionCache[key] = entry
 	e.decisionCacheMu.Unlock()
@@ -2498,15 +2343,69 @@ func (e *Engine) setDecisionInCache(key DecisionKey, dec *Decision) {
 func (e *Engine) InvalidateDecisionCache() {
 	// Simple full flush for now
 	e.decisionCacheMu.Lock()
-	defer e.decisionCacheMu.Unlock()
 	for k := range e.decisionCache {
 		delete(e.decisionCache, k)
+	}
+	e.decisionCacheMu.Unlock()
+	// clear ristretto cache if present by recreating to ensure full flush
+	if e.ristCache != nil {
+		e.ristCache.Clear()
 	}
 }
 
 // Attribute providers
 func (e *Engine) RegisterAttributeProvider(p AttributeProvider) {
 	e.attrProviders = append(e.attrProviders, p)
+}
+
+// ConfigureRistrettoDecisionCache enables a Ristretto-backed decision cache with provided params.
+// numCounters: number of keys to track frequency; maxCost: approximate max cost in bytes; bufferItems: internal buffer size
+func (e *Engine) ConfigureRistrettoDecisionCache(numCounters int64, maxCost int64, bufferItems int64) error {
+	cfg := &ristretto.Config{
+		NumCounters: numCounters,
+		MaxCost:     maxCost,
+		BufferItems: int64(bufferItems),
+	}
+	cache, err := ristretto.NewCache(cfg)
+	if err != nil {
+		return err
+	}
+	e.ristCache = cache
+	return nil
+}
+
+// Role membership store wiring
+func (e *Engine) SetRoleMembershipStore(s RoleMembershipStore) {
+	e.roleMembershipStore = s
+}
+
+func (e *Engine) AssignRoleToUser(ctx context.Context, subjectID, roleID string) error {
+	if e.roleMembershipStore == nil {
+		return fmt.Errorf("role membership store not configured")
+	}
+	err := e.roleMembershipStore.AssignRole(ctx, subjectID, roleID)
+	if err == nil {
+		e.InvalidateDecisionCache()
+	}
+	return err
+}
+
+func (e *Engine) RevokeRoleFromUser(ctx context.Context, subjectID, roleID string) error {
+	if e.roleMembershipStore == nil {
+		return fmt.Errorf("role membership store not configured")
+	}
+	err := e.roleMembershipStore.RevokeRole(ctx, subjectID, roleID)
+	if err == nil {
+		e.InvalidateDecisionCache()
+	}
+	return err
+}
+
+func (e *Engine) ListRolesForUser(ctx context.Context, subjectID string) ([]string, error) {
+	if e.roleMembershipStore == nil {
+		return nil, fmt.Errorf("role membership store not configured")
+	}
+	return e.roleMembershipStore.ListRoles(ctx, subjectID)
 }
 
 // GetPolicyHistory wrapper
@@ -2517,6 +2416,15 @@ func (e *Engine) GetPolicyHistory(ctx context.Context, id string) ([]*Policy, er
 // GetAccessLog wrapper
 func (e *Engine) GetAccessLog(ctx context.Context, filter AuditFilter) ([]*AuditEntry, error) {
 	return e.auditStore.GetAccessLog(ctx, filter)
+}
+
+// Convenience wrappers for listing roles and policies
+func (e *Engine) ListRoles(ctx context.Context, tenantID string) ([]*Role, error) {
+	return e.roleStore.ListRoles(ctx, tenantID)
+}
+
+func (e *Engine) ListPolicies(ctx context.Context, tenantID string) ([]*Policy, error) {
+	return e.policyStore.ListPolicies(ctx, tenantID)
 }
 
 // ============================================================================
@@ -2594,6 +2502,12 @@ func (e *Engine) RevokeACL(ctx context.Context, id string) error {
 func (e *Engine) ExpireACL(ctx context.Context, id string, expiresAt time.Time) error {
 	// Implementation depends on ACL store capabilities
 	return nil
+}
+
+// ListACLsByResource proxies to the configured ACLStore. If resourceID is empty, implementations
+// should return all ACLs for the tenant/global scope when supported.
+func (e *Engine) ListACLsByResource(ctx context.Context, resourceID string) ([]*ACL, error) {
+	return e.aclStore.ListACLsByResource(ctx, resourceID)
 }
 
 func (e *Engine) ListEffectivePermissions(ctx context.Context, subject *Subject, resource *Resource) ([]Action, error) {
