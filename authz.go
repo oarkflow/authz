@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,7 +21,6 @@ import (
 	"log"
 
 	ristretto "github.com/dgraph-io/ristretto"
-	phlog "github.com/oarkflow/log"
 )
 
 // ============================================================================
@@ -103,6 +103,36 @@ func (m *MemoryAttributeProvider) GetAttributes(ctx context.Context, subject *Su
 
 func (m *MemoryAttributeProvider) SetAttributes(subjectID string, attrs map[string]any) {
 	m.store[subjectID] = attrs
+}
+
+// contextDecisionKey is the type used for storing decisions in a context.Context.
+// It is unexported to avoid collisions.
+type contextDecisionKey struct{}
+
+// ContextWithDecision returns a new context with the decision attached.
+func ContextWithDecision(ctx context.Context, d *Decision) context.Context {
+	return context.WithValue(ctx, contextDecisionKey{}, d)
+}
+
+// DecisionFromContext extracts a Decision from a context, or nil if none present.
+func DecisionFromContext(ctx context.Context) *Decision {
+	if ctx == nil {
+		return nil
+	}
+	if v := ctx.Value(contextDecisionKey{}); v != nil {
+		if d, ok := v.(*Decision); ok {
+			return d
+		}
+	}
+	return nil
+}
+
+// DecisionFromRequest returns a Decision attached to the given http.Request's context.
+func DecisionFromRequest(r *http.Request) *Decision {
+	if r == nil {
+		return nil
+	}
+	return DecisionFromContext(r.Context())
 }
 
 // ============================================================================
@@ -569,7 +599,25 @@ type AuditEntry struct {
 	Action    Action         `json:"action"`
 	Resource  *Resource      `json:"resource"`
 	Decision  *Decision      `json:"decision"`
+	TraceID   string         `json:"trace_id,omitempty"`
 	Metadata  map[string]any `json:"metadata"`
+}
+
+// GetTraceID returns the trace id if set directly or inside Metadata["trace_id"].
+func (a *AuditEntry) GetTraceID() string {
+	if a == nil {
+		return ""
+	}
+	if a.TraceID != "" {
+		return a.TraceID
+	}
+	if a.Metadata != nil {
+		if v, ok := a.Metadata["trace_id"]; ok {
+			s, _ := v.(string)
+			return s
+		}
+	}
+	return ""
 }
 
 // AuditFilter for querying audit logs
@@ -1085,6 +1133,11 @@ type AttributeProvider interface {
 	GetAttributes(ctx context.Context, subject *Subject) (map[string]any, error)
 }
 
+type attrCacheEntry struct {
+	attrs     map[string]any
+	expiresAt time.Time
+}
+
 type Engine struct {
 	policyStore         PolicyStore
 	roleStore           RoleStore
@@ -1096,10 +1149,18 @@ type Engine struct {
 	decisionCacheTTL    time.Duration
 	attrProviders       []AttributeProvider
 	roleMembershipStore RoleMembershipStore
+	// attribute cache for external providers
+	attrCache    map[string]*attrCacheEntry
+	attrCacheMu  sync.RWMutex
+	attrCacheTTL time.Duration
 	// optional Ristretto cache for decisions
 	ristCache       *ristretto.Cache
 	decisionCacheMu sync.RWMutex
 	tenantResolver  TenantResolver
+	// logger for structured logs (pluggable)
+	logger Logger
+	// pluggable trace id generator
+	traceIDFunc TraceIDFunc
 	// pools for hot-path objects
 	evalCtxPool sync.Pool
 	// asynchronous audit channel to avoid per-request allocations
@@ -1137,7 +1198,13 @@ func NewEngine(
 		decisionCache:    make(map[DecisionKey]*DecisionCacheEntry),
 		decisionCacheTTL: time.Second, // default short TTL
 		attrProviders:    []AttributeProvider{},
+		attrCache:        make(map[string]*attrCacheEntry),
+		attrCacheTTL:     5 * time.Second,
+
+		logger:      NewPhusluLogger(),
+		traceIDFunc: func() string { return fmt.Sprintf("%d", time.Now().UnixNano()) },
 	}
+
 	// init pools
 	e.evalCtxPool.New = func() any { return &EvalContext{} }
 
@@ -1234,17 +1301,15 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 		}
 	}
 
-	// Enrich subject attributes from external providers (only on cache miss)
-	for _, p := range e.attrProviders {
-		if attrs, err := p.GetAttributes(ctx, subject); err == nil && attrs != nil {
-			if subject.Attrs == nil {
-				subject.Attrs = make(map[string]any)
-			}
-			for k, v := range attrs {
-				// do not overwrite existing attributes
-				if _, exists := subject.Attrs[k]; !exists {
-					subject.Attrs[k] = v
-				}
+	// Enrich subject attributes from external providers (cached)
+	if attrs, err := e.getAttributes(ctx, subject); err == nil && attrs != nil {
+		if subject.Attrs == nil {
+			subject.Attrs = make(map[string]any)
+		}
+		for k, v := range attrs {
+			// do not overwrite existing attributes
+			if _, exists := subject.Attrs[k]; !exists {
+				subject.Attrs[k] = v
 			}
 		}
 	}
@@ -1461,6 +1526,21 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 // Explain returns a detailed trace of the authorization decision
 func (e *Engine) Explain(ctx context.Context, subject *Subject, action Action, resource *Resource, env *Environment) (*Decision, error) {
 	return e.authorizeInternal(ctx, subject, action, resource, env, true)
+}
+
+// Can is a convenience wrapper that checks whether the given subject can perform
+// the HTTP method on the path within the provided environment. It returns the
+// boolean allowed result, the decision and any error.
+func (e *Engine) Can(ctx context.Context, subject *Subject, method, path string, env *Environment) (bool, *Decision, error) {
+	if env == nil {
+		env = &Environment{Time: time.Now()}
+	}
+	res := &Resource{Type: "route", ID: method + ":" + path, TenantID: env.TenantID}
+	dec, err := e.Authorize(ctx, subject, Action(method), res, env)
+	if err != nil {
+		return false, dec, err
+	}
+	return dec.Allowed, dec, nil
 }
 
 func (e *Engine) checkPolicies(_ context.Context, evalCtx *EvalContext, effect Effect) (bool, string, []string) {
@@ -2047,6 +2127,14 @@ func matchResource(pattern string, resource *Resource) bool {
 }
 
 func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, resource *Resource, decision *Decision) {
+	// Generate a trace id for this audit event (pluggable)
+	traceID := ""
+	if e.traceIDFunc != nil {
+		traceID = e.traceIDFunc()
+	} else {
+		traceID = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+
 	// Send a value copy to the async audit channel (non-blocking) to avoid
 	// allocating an AuditEntry on the hot path.
 	entry := AuditEntry{
@@ -2056,9 +2144,11 @@ func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, re
 		Action:    action,
 		Resource:  resource,
 		Decision:  decision,
+		TraceID:   traceID,
+		Metadata:  map[string]any{"trace_id": traceID},
 	}
 
-	// Log using phuslu/log for observability (non-blocking/opinionated)
+	// Log structured audit using configured logger (non-blocking/opinionated)
 	resStr := ""
 	if resource != nil {
 		resStr = resource.Type + ":" + resource.ID
@@ -2067,15 +2157,18 @@ func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, re
 	if subject != nil {
 		subID = subject.ID
 	}
-	phlog.Info().
-		Str("tenant", e.buildAuditTenantID(subject, resource)).
-		Str("subject", subID).
-		Any("action", action).
-		Str("resource", resStr).
-		Bool("allowed", decision.Allowed).
-		Str("matched_by", decision.MatchedBy).
-		Str("reason", decision.Reason).
-		Msg("audit decision")
+	if e.logger != nil {
+		e.logger.Info("audit decision",
+			"tenant", e.buildAuditTenantID(subject, resource),
+			"subject", subID,
+			"action", action,
+			"resource", resStr,
+			"allowed", decision.Allowed,
+			"matched_by", decision.MatchedBy,
+			"reason", decision.Reason,
+			"trace_id", traceID,
+		)
+	}
 
 	select {
 	case e.auditCh <- entry:
@@ -2356,6 +2449,62 @@ func (e *Engine) InvalidateDecisionCache() {
 // Attribute providers
 func (e *Engine) RegisterAttributeProvider(p AttributeProvider) {
 	e.attrProviders = append(e.attrProviders, p)
+}
+
+// SetAttributeCacheTTL sets TTL for cached attributes from external providers
+func (e *Engine) SetAttributeCacheTTL(d time.Duration) {
+	e.attrCacheMu.Lock()
+	defer e.attrCacheMu.Unlock()
+	e.attrCacheTTL = d
+}
+
+// InvalidateAttributeCache invalidates cached attributes for a subject
+func (e *Engine) InvalidateAttributeCache(subjectID string) {
+	if subjectID == "" {
+		return
+	}
+	e.attrCacheMu.Lock()
+	delete(e.attrCache, subjectID)
+	e.attrCacheMu.Unlock()
+}
+
+// getAttributes returns merged attributes from providers, using cache when available
+func (e *Engine) getAttributes(ctx context.Context, subject *Subject) (map[string]any, error) {
+	if subject == nil {
+		return nil, nil
+	}
+	// check cache
+	e.attrCacheMu.RLock()
+	if ent, ok := e.attrCache[subject.ID]; ok {
+		if time.Now().Before(ent.expiresAt) {
+			// return a shallow copy to avoid accidental mutation
+			copy := make(map[string]any, len(ent.attrs))
+			for k, v := range ent.attrs {
+				copy[k] = v
+			}
+			e.attrCacheMu.RUnlock()
+			return copy, nil
+		}
+	}
+	e.attrCacheMu.RUnlock()
+
+	merged := make(map[string]any)
+	for _, p := range e.attrProviders {
+		if attrs, err := p.GetAttributes(ctx, subject); err == nil && attrs != nil {
+			for k, v := range attrs {
+				if _, ok := merged[k]; !ok {
+					merged[k] = v
+				}
+			}
+		}
+	}
+	// store to cache
+	ent := &attrCacheEntry{attrs: merged, expiresAt: time.Now().Add(e.attrCacheTTL)}
+	e.attrCacheMu.Lock()
+	e.attrCache[subject.ID] = ent
+	e.attrCacheMu.Unlock()
+
+	return merged, nil
 }
 
 // ConfigureRistrettoDecisionCache enables a Ristretto-backed decision cache with provided params.

@@ -19,10 +19,11 @@ func main() {
 
 	policyStore := stores.NewMemoryPolicyStore()
 	roleStore := stores.NewMemoryRoleStore()
+	rmStore := stores.NewMemoryRoleMembershipStore()
 	aclStore := stores.NewMemoryACLStore()
 	auditStore := stores.NewMemoryAuditStore()
 
-	eng := authz.NewEngine(policyStore, roleStore, aclStore, auditStore)
+	eng := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(authz.NewNullLogger()))
 
 	// Role and policy: admin role can access any admin route
 	adminRole := &authz.Role{ID: "role-admin", TenantID: "t", Name: "admin", Permissions: []authz.Permission{{Action: "GET", Resource: "route:GET:/admin/*"}}}
@@ -62,42 +63,42 @@ func main() {
 	// Fiber app with authorization middleware
 	app := fiber.New()
 
-	// In-example roster for subjects -> roles (fallback when header not provided)
-	roleAssignments := map[string][]string{"sysadmin": {"role-admin"}, "mgr": {"role-manager"}}
+	// Register role membership for example subjects in the role membership store
+	_ = rmStore.AssignRole(ctx, "sysadmin", "role-admin")
+	_ = rmStore.AssignRole(ctx, "mgr", "role-manager")
 
-	app.Use(func(c *fiber.Ctx) error {
-		// Build subject from headers (X-Subject-ID, X-Subject-Roles, X-Tenant-ID)
-		subID := c.Get("X-Subject-ID")
-		tenantID := c.Get("X-Tenant-ID")
-		if tenantID == "" {
-			tenantID = "t"
+	// Define simple extractor functions for this example (app-level code owns these rules)
+	subjectFn := func(c *fiber.Ctx) string { return c.Get("X-Subject-ID") }
+	tenantFn := func(c *fiber.Ctx) string { return c.Get("X-Tenant-ID") }
+	resourceFn := func(c *fiber.Ctx) *authz.Resource {
+		res := &authz.Resource{Type: "route", ID: c.Method() + ":" + c.Path(), TenantID: tenantFn(c)}
+		// Try route param "id" as owner; if not available, fallback to last path segment
+		if id := c.Params("id"); id != "" {
+			res.OwnerID = id
+			return res
 		}
-		rolesStr := c.Get("X-Subject-Roles")
-		roles := []string{}
-		if rolesStr != "" {
-			roles = strings.Split(rolesStr, ",")
-		} else if asgn, ok := roleAssignments[subID]; ok {
-			// fallback mapping in this example
-			roles = append(roles, asgn...)
-		}
-		sub := &authz.Subject{ID: subID, TenantID: tenantID, Roles: roles}
-
-		// Resource: encode method:path into resource.ID and set OwnerID when possible
-		path := c.Path()
-		res := &authz.Resource{Type: "route", ID: c.Method() + ":" + path, TenantID: tenantID}
-		// If path is like /users/:id, set OwnerID so owner-based policies can match
+		path := c.OriginalURL()
 		parts := strings.Split(strings.Trim(path, "/"), "/")
-		if len(parts) > 1 && parts[0] == "users" {
-			res.OwnerID = parts[len(parts)-1]
+		if len(parts) >= 1 {
+			last := parts[len(parts)-1]
+			if last != "" {
+				res.OwnerID = last
+			}
 		}
-		env := &authz.Environment{Time: time.Now(), TenantID: tenantID}
+		return res
+	}
 
-		decision, _ := eng.Authorize(context.Background(), sub, authz.Action(c.Method()), res, env)
-		if decision.Allowed {
-			return c.Next()
-		}
-		return c.Status(http.StatusForbidden).SendString("forbidden")
-	})
+	// Use the library-provided middleware with custom extractor functions (no hard-coded behavior in the middleware)
+	opts := &FiberAuthOptions{
+		Engine:   eng,
+		Subject:  subjectFn,
+		Tenant:   tenantFn,
+		Resource: resourceFn,
+		OnDenied: func(c *fiber.Ctx, decision *authz.Decision) error {
+			return c.Status(http.StatusForbidden).SendString("custom forbidden")
+		},
+	}
+	app.Use(NewFiberAuthMiddleware(opts))
 
 	app.Get("/admin/dashboard", func(c *fiber.Ctx) error {
 		return c.SendString("admin dashboard")
@@ -125,7 +126,7 @@ func main() {
 	// Admin access
 	req, _ := http.NewRequest("GET", "http://localhost:3000/admin/dashboard", nil)
 	req.Header.Set("X-Subject-ID", "sysadmin")
-	req.Header.Set("X-Subject-Roles", "role-admin")
+	req.Header.Set("X-Tenant-ID", "t")
 	resp, _ := http.DefaultClient.Do(req)
 	n, _ := resp.Body.Read(b)
 	resp.Body.Close()
@@ -134,6 +135,7 @@ func main() {
 	// Owner access to their profile
 	req2, _ := http.NewRequest("GET", "http://localhost:3000/users/alice", nil)
 	req2.Header.Set("X-Subject-ID", "alice")
+	req2.Header.Set("X-Tenant-ID", "t")
 	resp2, _ := http.DefaultClient.Do(req2)
 	n2, _ := resp2.Body.Read(b)
 	resp2.Body.Close()
@@ -142,6 +144,7 @@ func main() {
 	// Non-owner denied (bob)
 	req3, _ := http.NewRequest("GET", "http://localhost:3000/users/alice", nil)
 	req3.Header.Set("X-Subject-ID", "bob")
+	req3.Header.Set("X-Tenant-ID", "t")
 	resp3, _ := http.DefaultClient.Do(req3)
 	n3, _ := resp3.Body.Read(b)
 	resp3.Body.Close()
@@ -150,6 +153,7 @@ func main() {
 	// Sysadmin implicit role (no X-Subject-Roles header) should be allowed via roleAssignments fallback
 	reqSys, _ := http.NewRequest("GET", "http://localhost:3000/admin/dashboard", nil)
 	reqSys.Header.Set("X-Subject-ID", "sysadmin")
+	reqSys.Header.Set("X-Tenant-ID", "t")
 	respSys, _ := http.DefaultClient.Do(reqSys)
 	nSys, _ := respSys.Body.Read(b)
 	respSys.Body.Close()
@@ -159,6 +163,7 @@ func main() {
 	reqMgr, _ := http.NewRequest("GET", "http://localhost:3000/admin/dashboard", nil)
 	reqMgr.Header.Set("X-Subject-ID", "mgr")
 	reqMgr.Header.Set("X-Subject-Roles", "role-manager")
+	reqMgr.Header.Set("X-Tenant-ID", "t")
 	respMgr, _ := http.DefaultClient.Do(reqMgr)
 	n4, _ := respMgr.Body.Read(b)
 	respMgr.Body.Close()
@@ -167,6 +172,7 @@ func main() {
 	// Guest public (ACL allowed)
 	reqGuest, _ := http.NewRequest("GET", "http://localhost:3000/public/info", nil)
 	reqGuest.Header.Set("X-Subject-ID", "guest")
+	reqGuest.Header.Set("X-Tenant-ID", "t")
 	respGuest, _ := http.DefaultClient.Do(reqGuest)
 	n5, _ := respGuest.Body.Read(b)
 	respGuest.Body.Close()
