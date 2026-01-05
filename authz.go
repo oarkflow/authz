@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -1292,6 +1293,7 @@ type Engine struct {
 	decisionCacheTTL    time.Duration
 	attrProviders       []AttributeProvider
 	roleMembershipStore RoleMembershipStore
+	bundleDistributor   *PolicyBundleDistributor
 	// attribute cache for external providers
 	attrCache    map[string]*attrCacheEntry
 	attrCacheMu  sync.RWMutex
@@ -1310,6 +1312,7 @@ type Engine struct {
 	auditCh            chan AuditEntry
 	auditBatchSize     int
 	auditFlushInterval time.Duration
+	batchWorkerCount   int
 }
 
 type EngineOption func(*Engine) error
@@ -1339,6 +1342,22 @@ func WithAuditBatching(batchSize int, flushInterval time.Duration) EngineOption 
 	}
 }
 
+func WithPolicyBundleDistributor(dist *PolicyBundleDistributor) EngineOption {
+	return func(e *Engine) error {
+		e.SetBundleDistributor(dist)
+		return nil
+	}
+}
+
+func WithBatchWorkers(workers int) EngineOption {
+	return func(e *Engine) error {
+		if workers > 0 {
+			e.batchWorkerCount = workers
+		}
+		return nil
+	}
+}
+
 func NewEngine(
 	policyStore PolicyStore,
 	roleStore RoleStore,
@@ -1363,6 +1382,7 @@ func NewEngine(
 		auditCh:            make(chan AuditEntry, 4096),
 		auditBatchSize:     64,
 		auditFlushInterval: 25 * time.Millisecond,
+		batchWorkerCount:   runtime.NumCPU(),
 	}
 
 	// init pools
@@ -2331,17 +2351,83 @@ func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, re
 	}
 }
 
-// BatchAuthorize evaluates multiple authorization requests
+// BatchAuthorize evaluates multiple authorization requests, fan-out dynamically, and reuses cache hits.
 func (e *Engine) BatchAuthorize(ctx context.Context, requests []AuthRequest) ([]*Decision, error) {
+	if len(requests) == 0 {
+		return []*Decision{}, nil
+	}
 	decisions := make([]*Decision, len(requests))
+	type task struct {
+		idx int
+		req AuthRequest
+	}
+	missCh := make(chan task)
+	errCh := make(chan error, 1)
+	workers := e.batchWorkerCount
+	if workers <= 0 {
+		workers = runtime.NumCPU()
+	}
+	if workers > len(requests) {
+		workers = len(requests)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for work := range missCh {
+				select {
+				case <-ctx.Done():
+					e.pushBatchError(errCh, ctx.Err())
+					return
+				default:
+				}
+				decision, err := e.Authorize(ctx, work.req.Subject, work.req.Action, work.req.Resource, work.req.Environment)
+				if err != nil {
+					e.pushBatchError(errCh, err)
+					return
+				}
+				decisions[work.idx] = decision
+			}
+		}()
+	}
 	for i, req := range requests {
-		decision, err := e.Authorize(ctx, req.Subject, req.Action, req.Resource, req.Environment)
-		if err != nil {
-			return nil, err
+		if req.Subject == nil || req.Resource == nil || req.Environment == nil {
+			close(missCh)
+			wg.Wait()
+			return nil, fmt.Errorf("batch request %d missing subject/resource/environment", i)
 		}
-		decisions[i] = decision
+		ck := e.buildCacheKey(req.Subject, req.Action, req.Resource, req.Environment)
+		if decision, ok := e.getDecisionFromCache(ck); ok {
+			decisions[i] = decision
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			close(missCh)
+			wg.Wait()
+			return nil, ctx.Err()
+		case missCh <- task{idx: i, req: req}:
+		}
+	}
+	close(missCh)
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return nil, err
+	default:
 	}
 	return decisions, nil
+}
+
+func (e *Engine) pushBatchError(ch chan<- error, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case ch <- err:
+	default:
+	}
 }
 
 func (e *Engine) startAuditWorker() {
@@ -2394,10 +2480,10 @@ func (e *Engine) flushAuditBatch(batch []*AuditEntry) {
 }
 
 type AuthRequest struct {
-	Subject     *Subject
-	Action      Action
-	Resource    *Resource
-	Environment *Environment
+	Subject     *Subject     `json:"subject"`
+	Action      Action       `json:"action"`
+	Resource    *Resource    `json:"resource"`
+	Environment *Environment `json:"environment"`
 }
 
 // ============================================================================
@@ -2422,6 +2508,7 @@ func (e *Engine) CreatePolicy(ctx context.Context, policy *Policy) error {
 	err := e.policyStore.CreatePolicy(ctx, policy)
 	if err == nil {
 		e.InvalidateDecisionCache()
+		e.notifyBundleDistributor(policy.TenantID)
 	}
 	return err
 }
@@ -2436,14 +2523,20 @@ func (e *Engine) UpdatePolicy(ctx context.Context, policy *Policy) error {
 	err := e.policyStore.UpdatePolicy(ctx, policy)
 	if err == nil {
 		e.InvalidateDecisionCache()
+		e.notifyBundleDistributor(policy.TenantID)
 	}
 	return err
 }
 
 func (e *Engine) DeletePolicy(ctx context.Context, id string) error {
+	tenantID := ""
+	if existing, err := e.policyStore.GetPolicy(ctx, id); err == nil && existing != nil {
+		tenantID = existing.TenantID
+	}
 	err := e.policyStore.DeletePolicy(ctx, id)
 	if err == nil {
 		e.InvalidateDecisionCache()
+		e.notifyBundleDistributor(tenantID)
 	}
 	return err
 }
@@ -2454,7 +2547,12 @@ func (e *Engine) EnablePolicy(ctx context.Context, id string) error {
 		return err
 	}
 	policy.Enabled = true
-	return e.policyStore.UpdatePolicy(ctx, policy)
+	if err := e.policyStore.UpdatePolicy(ctx, policy); err != nil {
+		return err
+	}
+	e.InvalidateDecisionCache()
+	e.notifyBundleDistributor(policy.TenantID)
+	return nil
 }
 
 func (e *Engine) DisablePolicy(ctx context.Context, id string) error {
@@ -2463,7 +2561,12 @@ func (e *Engine) DisablePolicy(ctx context.Context, id string) error {
 		return err
 	}
 	policy.Enabled = false
-	return e.policyStore.UpdatePolicy(ctx, policy)
+	if err := e.policyStore.UpdatePolicy(ctx, policy); err != nil {
+		return err
+	}
+	e.InvalidateDecisionCache()
+	e.notifyBundleDistributor(policy.TenantID)
+	return nil
 }
 
 func (e *Engine) ValidatePolicy(policy *Policy) error {
@@ -2495,6 +2598,18 @@ func (e *Engine) SimulatePolicy(ctx context.Context, policy *Policy, subject *Su
 // SetTenantResolver installs a tenant resolver for hierarchical tenant checks
 func (e *Engine) SetTenantResolver(tr TenantResolver) {
 	e.tenantResolver = tr
+}
+
+// SetBundleDistributor wires the policy bundle distributor so policy mutations trigger signed pushes.
+func (e *Engine) SetBundleDistributor(dist *PolicyBundleDistributor) {
+	e.bundleDistributor = dist
+}
+
+func (e *Engine) notifyBundleDistributor(tenantID string) {
+	if e.bundleDistributor == nil || tenantID == "" {
+		return
+	}
+	e.bundleDistributor.NotifyPolicyChange(tenantID)
 }
 
 // ApplySignedBundle verifies signatures and applies policies to the store

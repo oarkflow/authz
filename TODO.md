@@ -1,10 +1,10 @@
 # Modernization & Optimization TODOs
 
 ## Modern Feature Enhancements
-- [ ] Policy bundle distribution service with signature rotation to push signed updates to engines without restarts, extending the `SignedPolicyBundle` helpers in `authz.go`.
-- [ ] Batch decision API (e.g., `Engine.BatchAuthorize`) to evaluate many subject/action/resource tuples in one pass, reducing network chattiness for UI permission matrices.
-- [ ] Delegated admin surface (gRPC/HTTP) for tenant-scoped role + policy management to complement existing builder APIs in `builders.go`.
-- [ ] Decision explanation endpoint that reuses `Decision.Trace` to provide human-friendly narratives for UI tooling.
+- [x] Policy bundle distribution service with signature rotation to push signed updates to engines without restarts, extending the `SignedPolicyBundle` helpers in `authz.go`. (see `bundle_distributor.go`, engine hooks)
+- [x] Batch decision API (e.g., `Engine.BatchAuthorize`) to evaluate many subject/action/resource tuples in one pass, reducing network chattiness for UI permission matrices. (worker pool + /tenants/{id}/batch endpoint)
+- [x] Delegated admin surface (HTTP) for tenant-scoped role + policy management to complement existing builder APIs in `builders.go`. (implemented admin HTTP server)
+- [x] Decision explanation endpoint that reuses `Decision.Trace` to provide human-friendly narratives for UI tooling. (admin HTTP `/tenants/{id}/explain`)
 
 ## Performance Optimizations
 - [x] Compile-and-cache parsed conditions so `ParseCondition` runs once per policy version instead of per evaluation path in `authz.go` (cached in SQL policy store).

@@ -19,3 +19,38 @@ Precedence and semantics
 - Cross-tenant admins and existing RBAC/ACL/ABAC rules still apply as before.
 
 This document provides a brief summary; see the inline comments in `authz.go` for exact behavior and examples in `examples/main.go`.
+
+## Admin HTTP Surface
+
+`authz` now ships with a lightweight HTTP control plane you can embed alongside your engines:
+
+```go
+engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore)
+admin  := authz.NewAdminHTTPServer(engine)
+go admin.Start(":8081")
+```
+
+Endpoints (all tenant-scoped) include:
+
+- `POST /tenants/{tenant}/policies` – create or update ABAC policies using the familiar builder fields.
+- `POST /tenants/{tenant}/roles` – manage RBAC roles, inheritance, and owner allowances.
+- `POST /tenants/{tenant}/batch` – submit `BatchAuthorize` requests for UI matrix checks in one roundtrip.
+- `POST /tenants/{tenant}/explain` – return `Decision.Trace` narratives to power audit-friendly tooling.
+
+Use `WithAdminAuth` to plug in your own authn/authz middleware before requests are processed.
+
+## Policy Bundle Distribution
+
+The new `PolicyBundleDistributor` watches policy changes, signs bundles with rotating Ed25519 keys, and pushes them to subscribing engines without a restart:
+
+```go
+dist, _ := authz.NewPolicyBundleDistributor(policyStore)
+dist.RegisterSubscriber("tenant-1", authz.BundleSubscriberFunc(func(ctx context.Context, tenant string, pub ed25519.PublicKey, bundle *authz.SignedPolicyBundle) error {
+  return remoteEngine.ApplySignedBundle(ctx, pub, bundle)
+}))
+dist.Start(context.Background())
+
+engine.SetBundleDistributor(dist)
+```
+
+Call `dist.NotifyPolicyChange(tenantID)` or rely on the engine's policy mutators to trigger pushes automatically. Bundles include metadata about the tenant, generation time, and the active signing key so consumers can verify signatures before applying.
