@@ -1,0 +1,34 @@
+# AuthZ DSL Configuration
+# Syntax: <directive> <args...> [options...]
+
+# Define tenants
+tenant root "Root Organization"
+tenant org1 "Engineering Org" parent:root
+tenant team1 "Backend Team" parent:org1
+
+# Define policies: <id> <tenant> <effect> <actions> <resources> <condition> [priority:<n>]
+policy allow-read org1 allow read document:* subject.type=user priority:10
+policy allow-admin org1 allow * * subject.roles@admin,superadmin priority:100
+policy deny-sensitive org1 deny read,write,delete document:sensitive:* subject.attrs.clearance=low priority:200
+policy owner-access org1 allow read,write,delete document:* resource.owner_id=subject.id priority:50
+
+# Define roles: <id> <tenant> <name> <perms> [inherits:<roles>] [owner:<actions>]
+role admin org1 Administrator *:* 
+role editor org1 Editor read:document:*,write:document:*,delete:document:*
+role viewer org1 Viewer read:*
+role owner org1 Owner read:* owner:read,write,delete,share
+role team-lead team1 "Team Lead" *:project:* inherits:editor
+
+# Define ACLs: <id> <resource> <subject> <actions> <effect> [expires:<time>]
+acl acl-1 document:123 user:alice read,write allow
+acl acl-2 document:* group:engineering read allow
+acl acl-3 document:sensitive:* user:bob * deny
+
+# Define role memberships: <subject> <role>
+member user:alice admin
+member user:bob editor
+member user:charlie viewer
+member user:dave team-lead
+
+# Engine configuration: <key>=<value>...
+engine cache_ttl=5000 attr_ttl=10000 batch_size=128 flush_interval=50 workers=8

@@ -1,0 +1,192 @@
+version: 1
+
+# Tenant hierarchy
+tenants:
+  - id: root
+    name: Root Organization
+    parent: ""
+  - id: org1
+    name: Engineering Org
+    parent: root
+  - id: team1
+    name: Backend Team
+    parent: org1
+  - id: team2
+    name: Frontend Team
+    parent: org1
+
+# Tenant hierarchy mapping
+hierarchy:
+  org1: root
+  team1: org1
+  team2: org1
+
+# ABAC Policies
+policies:
+  - id: allow-document-read
+    tenant_id: org1
+    effect: allow
+    actions:
+      - read
+    resources:
+      - document:*
+    condition:
+      op: eq
+      field: subject.attrs.department
+      value: engineering
+    priority: 10
+    enabled: true
+
+  - id: allow-admin-all
+    tenant_id: org1
+    effect: allow
+    actions:
+      - "*"
+    resources:
+      - "*"
+    condition:
+      op: in
+      field: subject.roles
+      values:
+        - admin
+    priority: 100
+    enabled: true
+
+  - id: deny-sensitive-docs
+    tenant_id: org1
+    effect: deny
+    actions:
+      - read
+      - write
+      - delete
+    resources:
+      - document:sensitive:*
+    condition:
+      op: and
+      left:
+        op: eq
+        field: subject.attrs.clearance_level
+        value: low
+      right:
+        op: eq
+        field: resource.attrs.classification
+        value: confidential
+    priority: 200
+    enabled: true
+
+  - id: owner-access
+    tenant_id: org1
+    effect: allow
+    actions:
+      - read
+      - write
+      - delete
+    resources:
+      - document:*
+    condition:
+      op: eq
+      field: resource.owner_id
+      value: subject.id
+    priority: 50
+    enabled: true
+
+# RBAC Roles
+roles:
+  - id: admin
+    tenant_id: org1
+    name: Administrator
+    permissions:
+      - action: "*"
+        resource: "*"
+    inherits: []
+
+  - id: editor
+    tenant_id: org1
+    name: Editor
+    permissions:
+      - action: read
+        resource: document:*
+      - action: write
+        resource: document:*
+      - action: delete
+        resource: document:*
+    inherits: []
+
+  - id: viewer
+    tenant_id: org1
+    name: Viewer
+    permissions:
+      - action: read
+        resource: document:*
+    inherits: []
+
+  - id: owner
+    tenant_id: org1
+    name: Owner
+    owner_allowed_actions:
+      - read
+      - write
+      - delete
+      - share
+    permissions:
+      - action: read
+        resource: "*"
+    inherits: []
+
+  - id: team-lead
+    tenant_id: team1
+    name: Team Lead
+    permissions:
+      - action: "*"
+        resource: "project:*"
+    inherits:
+      - editor
+
+# ACLs (Fine-grained access control)
+acls:
+  - id: acl-user1-doc123
+    resource_id: document:123
+    subject_id: user:alice
+    actions:
+      - read
+      - write
+    effect: allow
+    expires_at: "0001-01-01T00:00:00Z"
+
+  - id: acl-group-eng-docs
+    resource_id: document:*
+    subject_id: group:engineering
+    actions:
+      - read
+    effect: allow
+    expires_at: "0001-01-01T00:00:00Z"
+
+  - id: acl-deny-bob-sensitive
+    resource_id: document:sensitive:*
+    subject_id: user:bob
+    actions:
+      - "*"
+    effect: deny
+    expires_at: "0001-01-01T00:00:00Z"
+
+# Role Memberships
+memberships:
+  - subject_id: user:alice
+    role_id: admin
+  - subject_id: user:bob
+    role_id: editor
+  - subject_id: user:charlie
+    role_id: viewer
+  - subject_id: user:dave
+    role_id: team-lead
+
+# Engine Configuration
+engine:
+  decision_cache_ttl_ms: 5000
+  attribute_cache_ttl_ms: 10000
+  audit_batch_size: 128
+  audit_flush_interval_ms: 50
+  batch_worker_count: 8
+  ristretto_num_counter: 65536
+  ristretto_max_cost: 4194304
+  ristretto_buffer: 64

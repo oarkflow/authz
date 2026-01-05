@@ -8,6 +8,7 @@ require (
 	github.com/oarkflow/log v1.0.84
 	github.com/oarkflow/squealx v0.0.63
 	github.com/redis/go-redis/v9 v9.17.2
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.38.2
 )
 

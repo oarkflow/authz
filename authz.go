@@ -706,7 +706,31 @@ func (bc *Bytecode) Eval(ctx *EvalContext) (bool, error) {
 					// resolve field references in set items
 					switch itv := it.(type) {
 					case string:
-						if itv == "action" || (len(itv) > 4 && (itv[:8] == "subject." || itv[:9] == "resource." || itv[:4] == "env.")) {
+						if itv == "action" {
+							rv := getField(ctx, itv)
+							if compare(val, rv) == 0 {
+								found = true
+								break
+							}
+							continue
+						}
+						if len(itv) > 8 && itv[:8] == "subject." {
+							rv := getField(ctx, itv)
+							if compare(val, rv) == 0 {
+								found = true
+								break
+							}
+							continue
+						}
+						if len(itv) > 9 && itv[:9] == "resource." {
+							rv := getField(ctx, itv)
+							if compare(val, rv) == 0 {
+								found = true
+								break
+							}
+							continue
+						}
+						if len(itv) > 4 && itv[:4] == "env." {
 							rv := getField(ctx, itv)
 							if compare(val, rv) == 0 {
 								found = true

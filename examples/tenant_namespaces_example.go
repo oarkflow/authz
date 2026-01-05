@@ -13,7 +13,7 @@ import (
 // This example demonstrates modelling tenant namespaces and scoped roles using
 // a combination of RBAC (roles + role membership) and ABAC (policies that check
 // subject attributes and environment metadata).
-func mai2n() {
+func main() {
 	ctx := context.Background()
 
 	policyStore := stores.NewMemoryPolicyStore()
