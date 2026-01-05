@@ -1,4 +1,4 @@
-package authz
+package logger
 
 import (
 	"context"
@@ -19,33 +19,23 @@ func NewSLogLogger(l *slog.Logger) *SLogLogger {
 }
 
 func (s *SLogLogger) Debug(msg string, keyvals ...any) {
-	attrs := make([]slog.Attr, 0, len(keyvals)/2)
-	for i := 0; i < len(keyvals)-1; i += 2 {
-		k := keyvals[i]
-		v := keyvals[i+1]
-		attrs = append(attrs, toSlogAttr(k, v))
-	}
-	s.l.Log(context.TODO(), slog.LevelDebug, msg, keyvals...)
+	s.log(slog.LevelDebug, msg, keyvals...)
 }
 
 func (s *SLogLogger) Info(msg string, keyvals ...any) {
-	attrs := make([]slog.Attr, 0, len(keyvals)/2)
-	for i := 0; i < len(keyvals)-1; i += 2 {
-		k := keyvals[i]
-		v := keyvals[i+1]
-		attrs = append(attrs, toSlogAttr(k, v))
-	}
-	s.l.Log(context.TODO(), slog.LevelInfo, msg, keyvals...)
+	s.log(slog.LevelInfo, msg, keyvals...)
 }
 
 func (s *SLogLogger) Error(msg string, keyvals ...any) {
+	s.log(slog.LevelError, msg, keyvals...)
+}
+
+func (s *SLogLogger) log(level slog.Level, msg string, keyvals ...any) {
 	attrs := make([]slog.Attr, 0, len(keyvals)/2)
 	for i := 0; i < len(keyvals)-1; i += 2 {
-		k := keyvals[i]
-		v := keyvals[i+1]
-		attrs = append(attrs, toSlogAttr(k, v))
+		attrs = append(attrs, toSlogAttr(keyvals[i], keyvals[i+1]))
 	}
-	s.l.Log(context.TODO(), slog.LevelError, msg, keyvals...)
+	s.l.LogAttrs(context.Background(), level, msg, attrs...)
 }
 
 // toSlogAttr converts a key/value pair to slog.Attr

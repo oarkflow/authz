@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/stores"
 )
 
-func mai3n() {
+func main() {
 	ctx := context.Background()
 
 	// Initialize stores (in-memory for example)
@@ -28,7 +29,7 @@ func mai3n() {
 		aclStore,
 		auditStore,
 		authz.WithRoleMembershipStore(rmStore),
-		authz.WithLogger(authz.NewSLogLogger(nil)),
+		authz.WithLogger(logger.NewSLogLogger(nil)),
 		authz.WithTraceIDFunc(tidGen),
 	)
 
@@ -174,14 +175,42 @@ func mai3n() {
 		fmt.Printf("replay matched=%v new_allowed=%v\n", matched, newDec.Allowed)
 	}
 
-	// BatchAuthorize example
-	batch := []authz.AuthRequest{
-		{Subject: subject1, Action: "user.create", Resource: &authz.Resource{Type: "backend", ID: "user"}, Environment: env},
-		{Subject: subject2, Action: "post.publish", Resource: &authz.Resource{Type: "backend", ID: "post"}, Environment: env},
+	// BatchAuthorize example with expected vs actual output
+	batchRequests := []struct {
+		name       string
+		req        authz.AuthRequest
+		expAllowed bool
+		expReason  string
+	}{
+		{
+			name:       "Admin creates user",
+			req:        authz.AuthRequest{Subject: subject1, Action: "user.create", Resource: &authz.Resource{Type: "backend", ID: "user"}, Environment: env},
+			expAllowed: false,
+			expReason:  "resource tenant mismatch",
+		},
+		{
+			name:       "Editor publish post",
+			req:        authz.AuthRequest{Subject: subject2, Action: "post.publish", Resource: &authz.Resource{Type: "backend", ID: "post"}, Environment: env},
+			expAllowed: false,
+			expReason:  "resource tenant mismatch",
+		},
+	}
+	batch := make([]authz.AuthRequest, len(batchRequests))
+	for i, br := range batchRequests {
+		batch[i] = br.req
 	}
 	resps, _ := engine.BatchAuthorize(ctx, batch)
 	fmt.Println("Batch results:")
-	for i, d := range resps {
-		fmt.Printf("  %d: allowed=%v reason=%s\n", i+1, d.Allowed, d.Reason)
+	for i, br := range batchRequests {
+		d := resps[i]
+		fmt.Printf("  %d (%s) -> Actual: allowed=%v reason=%s\n", i+1, br.name, d.Allowed, d.Reason)
+		fmt.Printf("                    Expected: allowed=%v reason=%s\n", br.expAllowed, br.expReason)
+		if d.Allowed != br.expAllowed || d.Reason != br.expReason {
+			ex, _ := engine.Explain(ctx, br.req.Subject, br.req.Action, br.req.Resource, br.req.Environment)
+			fmt.Println("    Explanation trace:")
+			for _, t := range ex.Trace {
+				fmt.Println("     ", t)
+			}
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package authz
+package logger
 
 // NullLogger implements Logger but does nothing (useful for tests)
 type NullLogger struct{}

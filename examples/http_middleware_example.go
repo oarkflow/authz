@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/stores"
 )
 
@@ -20,7 +21,7 @@ func main() {
 	aclStore := stores.NewMemoryACLStore()
 	auditStore := stores.NewMemoryAuditStore()
 
-	engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(authz.NewNullLogger()))
+	engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(logger.NewNullLogger()))
 
 	// RBAC: admin role for tenant "t"
 	adminRole := &authz.Role{ID: "role-admin", TenantID: "t", Name: "admin", Permissions: []authz.Permission{{Action: "GET", Resource: "route:GET:/admin/*"}}}

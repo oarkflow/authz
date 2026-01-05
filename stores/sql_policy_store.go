@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/oarkflow/authz"
@@ -12,11 +13,46 @@ import (
 
 // SQLPolicyStore persists policies in SQL (squealx)
 type SQLPolicyStore struct {
-	db *squealx.DB
+	db        *squealx.DB
+	condCache sync.Map
 }
 
 func NewSQLPolicyStore(db *squealx.DB) *SQLPolicyStore {
 	return &SQLPolicyStore{db: db}
+}
+
+func (s *SQLPolicyStore) conditionCacheKey(policyID string, version int, cond string) string {
+	if policyID != "" {
+		if version > 0 {
+			return fmt.Sprintf("%s:%d", policyID, version)
+		}
+		if cond != "" {
+			return policyID + ":" + cond
+		}
+	}
+	return cond
+}
+
+func (s *SQLPolicyStore) compileCondition(policyID string, version int, cond string) authz.Expr {
+	if cond == "" {
+		return &authz.TrueExpr{}
+	}
+	key := s.conditionCacheKey(policyID, version, cond)
+	if key != "" {
+		if cached, ok := s.condCache.Load(key); ok {
+			if expr, ok := cached.(authz.Expr); ok {
+				return expr
+			}
+		}
+	}
+	expr, err := authz.ParseCondition(cond)
+	if err != nil {
+		expr = &authz.TrueExpr{}
+	}
+	if key != "" {
+		s.condCache.Store(key, expr)
+	}
+	return expr
 }
 
 func (s *SQLPolicyStore) CreatePolicy(ctx context.Context, p *authz.Policy) error {
@@ -125,15 +161,7 @@ func (s *SQLPolicyStore) GetPolicy(ctx context.Context, id string) (*authz.Polic
 	var ress []string
 	_ = json.Unmarshal([]byte(resourcesJSON), &ress)
 	p.Resources = ress
-	if cond == "" {
-		p.Condition = &authz.TrueExpr{}
-	} else {
-		if expr, err := authz.ParseCondition(cond); err == nil {
-			p.Condition = expr
-		} else {
-			p.Condition = &authz.TrueExpr{}
-		}
-	}
+	p.Condition = s.compileCondition(idv, version, cond)
 	if createdRaw != nil {
 		switch v := createdRaw.(type) {
 		case time.Time:
@@ -202,6 +230,7 @@ func (s *SQLPolicyStore) insertPolicyHistory(ctx context.Context, p *authz.Polic
 		"actions":        p.Actions,
 		"resources":      p.Resources,
 		"condition_text": "",
+		"version":        p.Version,
 	}
 	if p.Condition != nil {
 		snap["condition_text"] = p.Condition.String()
@@ -260,12 +289,21 @@ func (s *SQLPolicyStore) GetPolicyHistory(ctx context.Context, id string) ([]*au
 			}
 			p.Resources = arr
 		}
-		if cond, ok := raw["condition_text"].(string); ok {
-			if expr, err := authz.ParseCondition(cond); err == nil {
-				p.Condition = expr
-			} else {
-				p.Condition = &authz.TrueExpr{}
+		var version int
+		if verRaw, ok := raw["version"]; ok {
+			switch vv := verRaw.(type) {
+			case float64:
+				version = int(vv)
+			case int:
+				version = vv
+			case json.Number:
+				if vi, err := vv.Int64(); err == nil {
+					version = int(vi)
+				}
 			}
+		}
+		if cond, ok := raw["condition_text"].(string); ok {
+			p.Condition = s.compileCondition(p.ID, version, cond)
 		}
 		out = append(out, p)
 	}

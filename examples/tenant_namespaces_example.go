@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/stores"
 )
 
@@ -21,7 +22,7 @@ func mai2n() {
 	auditStore := stores.NewMemoryAuditStore()
 	rmStore := stores.NewMemoryRoleMembershipStore()
 
-	engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(authz.NewNullLogger()))
+	engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(logger.NewNullLogger()))
 
 	// Roles
 	editor := &authz.Role{ID: "role-editor", TenantID: "tenant-a", Name: "Editor", Permissions: []authz.Permission{{Action: "post.edit", Resource: "backend:post"}}}

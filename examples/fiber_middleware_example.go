@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/stores"
 )
 
@@ -23,7 +24,7 @@ func main() {
 	aclStore := stores.NewMemoryACLStore()
 	auditStore := stores.NewMemoryAuditStore()
 
-	eng := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(authz.NewNullLogger()))
+	eng := authz.NewEngine(policyStore, roleStore, aclStore, auditStore, authz.WithRoleMembershipStore(rmStore), authz.WithLogger(logger.NewNullLogger()))
 
 	// Role and policy: admin role can access any admin route
 	adminRole := &authz.Role{ID: "role-admin", TenantID: "t", Name: "admin", Permissions: []authz.Permission{{Action: "GET", Resource: "route:GET:/admin/*"}}}

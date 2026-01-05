@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/authz"
@@ -138,12 +139,49 @@ func (s *MemoryRoleStore) ListRoles(ctx context.Context, tenantID string) ([]*au
 
 // MemoryACLStore implements in-memory ACL persistence
 type MemoryACLStore struct {
-	mu   sync.RWMutex
-	acls map[string]*authz.ACL
+	mu              sync.RWMutex
+	acls            map[string]*authz.ACL
+	snapshot        atomic.Value
+	refreshInterval time.Duration
+	stopCh          chan struct{}
 }
 
 func NewMemoryACLStore() *MemoryACLStore {
-	return &MemoryACLStore{acls: make(map[string]*authz.ACL)}
+	store := &MemoryACLStore{
+		acls:            make(map[string]*authz.ACL),
+		refreshInterval: 250 * time.Millisecond,
+		stopCh:          make(chan struct{}),
+	}
+	store.snapshot.Store([]*authz.ACL{})
+	go store.snapshotWorker()
+	return store
+}
+
+func (s *MemoryACLStore) snapshotWorker() {
+	ticker := time.NewTicker(s.refreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.rebuildACLSnapshot()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *MemoryACLStore) rebuildACLSnapshot() {
+	s.mu.RLock()
+	copyList := make([]*authz.ACL, 0, len(s.acls))
+	for _, acl := range s.acls {
+		if acl.IsExpired() {
+			continue
+		}
+		dup := *acl
+		copyList = append(copyList, &dup)
+	}
+	s.mu.RUnlock()
+	s.snapshot.Store(copyList)
 }
 
 func (s *MemoryACLStore) GrantACL(ctx context.Context, acl *authz.ACL) error {
@@ -151,6 +189,7 @@ func (s *MemoryACLStore) GrantACL(ctx context.Context, acl *authz.ACL) error {
 	defer s.mu.Unlock()
 	acl.CreatedAt = time.Now()
 	s.acls[acl.ID] = acl
+	go s.rebuildACLSnapshot()
 	return nil
 }
 
@@ -158,10 +197,23 @@ func (s *MemoryACLStore) RevokeACL(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.acls, id)
+	go s.rebuildACLSnapshot()
 	return nil
 }
 
+func (s *MemoryACLStore) Close() {
+	select {
+	case <-s.stopCh:
+		return
+	default:
+		close(s.stopCh)
+	}
+}
+
 func (s *MemoryACLStore) ListACLsByResource(ctx context.Context, resourceID string) ([]*authz.ACL, error) {
+	if snapshot, ok := s.snapshot.Load().([]*authz.ACL); ok && len(snapshot) > 0 {
+		return filterACLsSnapshot(snapshot, resourceID), nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]*authz.ACL, 0)
@@ -169,30 +221,23 @@ func (s *MemoryACLStore) ListACLsByResource(ctx context.Context, resourceID stri
 		if acl.IsExpired() {
 			continue
 		}
-		if acl.ResourceID == resourceID {
-			result = append(result, acl)
-			continue
-		}
-		for i, ch := range acl.ResourceID {
-			if ch == '*' {
-				prefix := acl.ResourceID[:i]
-				if len(resourceID) >= len(prefix) && resourceID[:len(prefix)] == prefix {
-					result = append(result, acl)
-				}
-				break
-			}
+		if aclMatchesResource(acl.ResourceID, resourceID) {
+			result = append(result, cloneACL(acl))
 		}
 	}
 	return result, nil
 }
 
 func (s *MemoryACLStore) ListACLsBySubject(ctx context.Context, subjectID string) ([]*authz.ACL, error) {
+	if snapshot, ok := s.snapshot.Load().([]*authz.ACL); ok && len(snapshot) > 0 {
+		return filterACLsBySubject(snapshot, subjectID), nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]*authz.ACL, 0)
 	for _, acl := range s.acls {
 		if acl.SubjectID == subjectID && !acl.IsExpired() {
-			result = append(result, acl)
+			result = append(result, cloneACL(acl))
 		}
 	}
 	return result, nil
@@ -245,12 +290,49 @@ func (s *MemoryAuditStore) GetAccessLog(ctx context.Context, filter authz.AuditF
 
 // MemoryRoleMembershipStore implements role membership in memory
 type MemoryRoleMembershipStore struct {
-	mu    sync.RWMutex
-	store map[string]map[string]bool
+	mu              sync.RWMutex
+	store           map[string]map[string]bool
+	snapshot        atomic.Value
+	refreshInterval time.Duration
+	stopCh          chan struct{}
 }
 
 func NewMemoryRoleMembershipStore() *MemoryRoleMembershipStore {
-	return &MemoryRoleMembershipStore{store: make(map[string]map[string]bool)}
+	store := &MemoryRoleMembershipStore{
+		store:           make(map[string]map[string]bool),
+		refreshInterval: 250 * time.Millisecond,
+		stopCh:          make(chan struct{}),
+	}
+	store.snapshot.Store(map[string][]string{})
+	go store.snapshotWorker()
+	return store
+}
+
+func (m *MemoryRoleMembershipStore) snapshotWorker() {
+	ticker := time.NewTicker(m.refreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.rebuildMembershipSnapshot()
+		case <-m.stopCh:
+			return
+		}
+	}
+}
+
+func (m *MemoryRoleMembershipStore) rebuildMembershipSnapshot() {
+	m.mu.RLock()
+	copyMap := make(map[string][]string, len(m.store))
+	for subj, roles := range m.store {
+		arr := make([]string, 0, len(roles))
+		for roleID := range roles {
+			arr = append(arr, roleID)
+		}
+		copyMap[subj] = arr
+	}
+	m.mu.RUnlock()
+	m.snapshot.Store(copyMap)
 }
 
 func (m *MemoryRoleMembershipStore) AssignRole(ctx context.Context, subjectID, roleID string) error {
@@ -260,6 +342,7 @@ func (m *MemoryRoleMembershipStore) AssignRole(ctx context.Context, subjectID, r
 		m.store[subjectID] = make(map[string]bool)
 	}
 	m.store[subjectID][roleID] = true
+	go m.rebuildMembershipSnapshot()
 	return nil
 }
 
@@ -270,10 +353,27 @@ func (m *MemoryRoleMembershipStore) RevokeRole(ctx context.Context, subjectID, r
 		return nil
 	}
 	delete(m.store[subjectID], roleID)
+	go m.rebuildMembershipSnapshot()
 	return nil
 }
 
+func (m *MemoryRoleMembershipStore) Close() {
+	select {
+	case <-m.stopCh:
+		return
+	default:
+		close(m.stopCh)
+	}
+}
+
 func (m *MemoryRoleMembershipStore) ListRoles(ctx context.Context, subjectID string) ([]string, error) {
+	if snap, ok := m.snapshot.Load().(map[string][]string); ok {
+		if roles, ok2 := snap[subjectID]; ok2 {
+			copyRoles := make([]string, len(roles))
+			copy(copyRoles, roles)
+			return copyRoles, nil
+		}
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]string, 0)

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/utils"
 
 	"log"
@@ -584,6 +585,11 @@ type AuditStore interface {
 	GetAccessLog(ctx context.Context, filter AuditFilter) ([]*AuditEntry, error)
 }
 
+// BatchAuditStore optionally allows flushing audit entries in batches.
+type BatchAuditStore interface {
+	LogDecisions(ctx context.Context, entries []*AuditEntry) error
+}
+
 // RoleMembershipStore persists assignments of roles to subjects
 type RoleMembershipStore interface {
 	AssignRole(ctx context.Context, subjectID, roleID string) error
@@ -852,25 +858,32 @@ type CompiledPolicy struct {
 }
 
 type PolicyIndex struct {
-	mu             sync.RWMutex
-	byAction       map[Action][]*CompiledPolicy
-	byResourceType map[string][]*CompiledPolicy
-	byTenant       map[string][]*CompiledPolicy
-	ownerIndex     map[string][]*CompiledPolicy // resourceType -> compiled policies containing resource.owner_id == subject.id
-	compiled       []*CompiledPolicy
-	compiledCache  map[string]*CompiledPolicy // key: policyID:checksum
-	lastCompiled   time.Time
+	mu                  sync.RWMutex
+	byAction            map[Action][]*CompiledPolicy
+	byResourceType      map[string][]*CompiledPolicy
+	byTenant            map[string][]*CompiledPolicy
+	ownerIndex          map[string][]*CompiledPolicy // resourceType -> compiled policies containing resource.owner_id == subject.id
+	compiled            []*CompiledPolicy
+	compiledCache       map[string]*CompiledPolicy // key: policyID:checksum
+	lastCompiled        time.Time
+	actionResourceIndex map[string][]*CompiledPolicy
+	candidateCache      *ristretto.Cache
 }
 
 func NewPolicyIndex() *PolicyIndex {
-	return &PolicyIndex{
-		byAction:       make(map[Action][]*CompiledPolicy),
-		byResourceType: make(map[string][]*CompiledPolicy),
-		byTenant:       make(map[string][]*CompiledPolicy),
-		ownerIndex:     make(map[string][]*CompiledPolicy),
-		compiled:       make([]*CompiledPolicy, 0),
-		compiledCache:  make(map[string]*CompiledPolicy),
+	idx := &PolicyIndex{
+		byAction:            make(map[Action][]*CompiledPolicy),
+		byResourceType:      make(map[string][]*CompiledPolicy),
+		byTenant:            make(map[string][]*CompiledPolicy),
+		ownerIndex:          make(map[string][]*CompiledPolicy),
+		compiled:            make([]*CompiledPolicy, 0),
+		compiledCache:       make(map[string]*CompiledPolicy),
+		actionResourceIndex: make(map[string][]*CompiledPolicy),
 	}
+	if cache, err := ristretto.NewCache(&ristretto.Config{NumCounters: 1 << 16, MaxCost: 1 << 22, BufferItems: 64}); err == nil {
+		idx.candidateCache = cache
+	}
+	return idx
 }
 
 func (idx *PolicyIndex) Rebuild(policies []*Policy) {
@@ -969,6 +982,12 @@ func (idx *PolicyIndex) Rebuild(policies []*Policy) {
 		}
 	}
 
+	// reset action/resource index and candidate cache
+	idx.actionResourceIndex = make(map[string][]*CompiledPolicy)
+	if idx.candidateCache != nil {
+		idx.candidateCache.Clear()
+	}
+
 	// reuse compiled slice buffer if capacity sufficient
 	if cap(idx.compiled) >= len(policies) {
 		idx.compiled = idx.compiled[:0]
@@ -1013,6 +1032,16 @@ func (idx *PolicyIndex) Rebuild(policies []*Policy) {
 		}
 
 		idx.byTenant[p.TenantID] = append(idx.byTenant[p.TenantID], cp)
+
+		// index by action/resource prefix combinations per tenant
+		for _, action := range p.Actions {
+			aKey := buildActionPatternKey(action)
+			for _, res := range p.Resources {
+				rKey := buildResourcePatternKey(res)
+				idxKey := makeActionResourceIndexKey(aKey, rKey, p.TenantID)
+				idx.actionResourceIndex[idxKey] = append(idx.actionResourceIndex[idxKey], cp)
+			}
+		}
 	}
 
 	// Sort by priority (descending)
@@ -1026,28 +1055,37 @@ func (idx *PolicyIndex) Rebuild(policies []*Policy) {
 	idx.lastCompiled = time.Now()
 }
 
-func (idx *PolicyIndex) GetRelevantPolicies(action Action, resourceType, tenantID string) []*CompiledPolicy {
+func (idx *PolicyIndex) GetRelevantPolicies(action Action, resource *Resource, tenantID string) []*CompiledPolicy {
+	resourceKey := ""
+	hasResource := false
+	if resource != nil {
+		resourceKey = resource.Type + ":" + resource.ID
+		hasResource = resource.Type != "" || resource.ID != ""
+	}
+	cacheKey := fmt.Sprintf("%s|%s|%s", tenantID, string(action), resourceKey)
+	if hasResource && idx.candidateCache != nil {
+		if v, ok := idx.candidateCache.Get(cacheKey); ok {
+			if cached, ok2 := v.([]*CompiledPolicy); ok2 {
+				return cached
+			}
+		}
+	}
+
+	if hasResource {
+		idx.mu.RLock()
+		indexed := idx.lookupActionResourceLocked(action, resourceKey, tenantID)
+		idx.mu.RUnlock()
+		if len(indexed) > 0 {
+			if hasResource && idx.candidateCache != nil {
+				idx.candidateCache.Set(cacheKey, indexed, int64(len(indexed)+1))
+			}
+			return indexed
+		}
+	}
+
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
-
-	// Prefer action-indexed list, filter by tenant
-	list := idx.byAction[action]
-	if len(list) == 0 {
-		// no action-specific policies: fallback to tenant list
-		list = idx.byTenant[tenantID]
-		if len(list) == 0 {
-			list = idx.byTenant[""]
-		}
-	}
-
-	res := make([]*CompiledPolicy, 0, len(list))
-	for _, cp := range list {
-		// tenant match or global
-		if cp.P.TenantID == tenantID || cp.P.TenantID == "" {
-			res = append(res, cp)
-		}
-	}
-	return res
+	return idx.fallbackPoliciesLocked(action, tenantID)
 }
 
 // GetOwnerPolicies returns owner-index policies for a resource type (may be empty)
@@ -1064,6 +1102,111 @@ func extractResourceType(pattern string) string {
 		}
 	}
 	return pattern
+}
+
+func patternKey(kind, value string) string {
+	return kind + ":" + value
+}
+
+func buildActionPatternKey(action Action) string {
+	s := string(action)
+	if s == "*" {
+		return patternKey("prefix", "")
+	}
+	if strings.HasSuffix(s, "*") {
+		return patternKey("prefix", s[:len(s)-1])
+	}
+	return patternKey("exact", s)
+}
+
+func buildResourcePatternKey(pattern string) string {
+	if pattern == "*" {
+		return patternKey("prefix", "")
+	}
+	if idx := strings.Index(pattern, "*"); idx != -1 {
+		return patternKey("prefix", pattern[:idx])
+	}
+	return patternKey("exact", pattern)
+}
+
+func makeActionResourceIndexKey(actionKey, resourceKey, tenant string) string {
+	return actionKey + "|" + resourceKey + "|" + tenant
+}
+
+func buildActionLookupKeys(action Action) []string {
+	s := string(action)
+	seen := make(map[string]struct{})
+	keys := make([]string, 0, len(s)+2)
+	keys = append(keys, patternKey("exact", s))
+	for i := len(s); i >= 0; i-- {
+		key := patternKey("prefix", s[:i])
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func buildResourceLookupKeys(resource string) []string {
+	seen := make(map[string]struct{})
+	keys := make([]string, 0, len(resource)+2)
+	keys = append(keys, patternKey("exact", resource))
+	for i := len(resource); i >= 0; i-- {
+		key := patternKey("prefix", resource[:i])
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func (idx *PolicyIndex) lookupActionResourceLocked(action Action, resourceKey, tenantID string) []*CompiledPolicy {
+	actionKeys := buildActionLookupKeys(action)
+	resourceKeys := buildResourceLookupKeys(resourceKey)
+	tenantKeys := []string{tenantID}
+	if tenantID != "" {
+		tenantKeys = append(tenantKeys, "")
+	}
+	result := make([]*CompiledPolicy, 0)
+	seen := make(map[*CompiledPolicy]struct{})
+	for _, ak := range actionKeys {
+		for _, rk := range resourceKeys {
+			for _, tk := range tenantKeys {
+				key := makeActionResourceIndexKey(ak, rk, tk)
+				if bucket, ok := idx.actionResourceIndex[key]; ok {
+					for _, cp := range bucket {
+						if _, exists := seen[cp]; exists {
+							continue
+						}
+						seen[cp] = struct{}{}
+						result = append(result, cp)
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (idx *PolicyIndex) fallbackPoliciesLocked(action Action, tenantID string) []*CompiledPolicy {
+	list := idx.byAction[action]
+	if len(list) == 0 {
+		list = idx.byTenant[tenantID]
+		if len(list) == 0 {
+			list = idx.byTenant[""]
+		}
+	}
+	res := make([]*CompiledPolicy, 0, len(list))
+	for _, cp := range list {
+		if cp.P.TenantID == tenantID || cp.P.TenantID == "" {
+			res = append(res, cp)
+		}
+	}
+	return res
 }
 
 // ============================================================================
@@ -1160,11 +1303,13 @@ type Engine struct {
 	// logger for structured logs (pluggable)
 	logger Logger
 	// pluggable trace id generator
-	traceIDFunc TraceIDFunc
+	traceIDFunc logger.TraceIDFunc
 	// pools for hot-path objects
 	evalCtxPool sync.Pool
 	// asynchronous audit channel to avoid per-request allocations
-	auditCh chan AuditEntry
+	auditCh            chan AuditEntry
+	auditBatchSize     int
+	auditFlushInterval time.Duration
 }
 
 type EngineOption func(*Engine) error
@@ -1178,6 +1323,18 @@ func WithRistretto(numCounters int64, maxCost int64, bufferItems int64) EngineOp
 func WithRoleMembershipStore(s RoleMembershipStore) EngineOption {
 	return func(e *Engine) error {
 		e.SetRoleMembershipStore(s)
+		return nil
+	}
+}
+
+func WithAuditBatching(batchSize int, flushInterval time.Duration) EngineOption {
+	return func(e *Engine) error {
+		if batchSize > 0 {
+			e.auditBatchSize = batchSize
+		}
+		if flushInterval > 0 {
+			e.auditFlushInterval = flushInterval
+		}
 		return nil
 	}
 }
@@ -1201,21 +1358,15 @@ func NewEngine(
 		attrCache:        make(map[string]*attrCacheEntry),
 		attrCacheTTL:     5 * time.Second,
 
-		logger:      NewPhusluLogger(),
-		traceIDFunc: func() string { return fmt.Sprintf("%d", time.Now().UnixNano()) },
+		logger:             logger.NewPhusluLogger(),
+		traceIDFunc:        func() string { return fmt.Sprintf("%d", time.Now().UnixNano()) },
+		auditCh:            make(chan AuditEntry, 4096),
+		auditBatchSize:     64,
+		auditFlushInterval: 25 * time.Millisecond,
 	}
 
 	// init pools
 	e.evalCtxPool.New = func() any { return &EvalContext{} }
-
-	// init audit channel and worker
-	e.auditCh = make(chan AuditEntry, 1024)
-	go func() {
-		bg := context.Background()
-		for entry := range e.auditCh {
-			_ = e.auditStore.LogDecision(bg, &entry)
-		}
-	}()
 
 	// Apply options
 	for _, opt := range opts {
@@ -1223,6 +1374,8 @@ func NewEngine(
 			log.Printf("engine option error: %v", err)
 		}
 	}
+
+	e.startAuditWorker()
 
 	return e
 }
@@ -1546,7 +1699,7 @@ func (e *Engine) Can(ctx context.Context, subject *Subject, method, path string,
 func (e *Engine) checkPolicies(_ context.Context, evalCtx *EvalContext, effect Effect) (bool, string, []string) {
 	policies := e.policyIndex.GetRelevantPolicies(
 		evalCtx.Action,
-		evalCtx.Resource.Type,
+		evalCtx.Resource,
 		evalCtx.Environment.TenantID,
 	)
 
@@ -1604,7 +1757,7 @@ func (e *Engine) checkPolicies(_ context.Context, evalCtx *EvalContext, effect E
 func (e *Engine) checkPoliciesFast(_ context.Context, evalCtx *EvalContext, effect Effect) (bool, string) {
 	policies := e.policyIndex.GetRelevantPolicies(
 		evalCtx.Action,
-		evalCtx.Resource.Type,
+		evalCtx.Resource,
 		evalCtx.Environment.TenantID,
 	)
 
@@ -2189,6 +2342,55 @@ func (e *Engine) BatchAuthorize(ctx context.Context, requests []AuthRequest) ([]
 		decisions[i] = decision
 	}
 	return decisions, nil
+}
+
+func (e *Engine) startAuditWorker() {
+	if e.auditBatchSize <= 0 {
+		e.auditBatchSize = 1
+	}
+	if e.auditFlushInterval <= 0 {
+		e.auditFlushInterval = 25 * time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(e.auditFlushInterval)
+		defer ticker.Stop()
+		batch := make([]*AuditEntry, 0, e.auditBatchSize)
+		flush := func() {
+			if len(batch) == 0 {
+				return
+			}
+			e.flushAuditBatch(batch)
+			batch = batch[:0]
+		}
+		for {
+			select {
+			case entry, ok := <-e.auditCh:
+				if !ok {
+					flush()
+					return
+				}
+				copyEntry := entry
+				batch = append(batch, &copyEntry)
+				if len(batch) >= e.auditBatchSize {
+					flush()
+				}
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
+}
+
+func (e *Engine) flushAuditBatch(batch []*AuditEntry) {
+	ctx := context.Background()
+	if bs, ok := e.auditStore.(BatchAuditStore); ok {
+		if err := bs.LogDecisions(ctx, batch); err == nil {
+			return
+		}
+	}
+	for _, entry := range batch {
+		_ = e.auditStore.LogDecision(ctx, entry)
+	}
 }
 
 type AuthRequest struct {
