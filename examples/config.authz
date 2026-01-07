@@ -4,16 +4,16 @@
 # Define tenants
 tenant root "Root Organization"
 tenant org1 "Engineering Org" parent:root
-tenant team1 "Backend Team" parent:org1
+tenant team1 "Backend Team" parent:"org1:dept1"
 
 # Define policies: <id> <tenant> <effect> <actions> <resources> <condition> [priority:<n>]
 policy allow-read org1 allow read document:* subject.type=user priority:10
 policy allow-admin org1 allow * * subject.roles@admin,superadmin priority:100
-policy deny-sensitive org1 deny read,write,delete document:sensitive:* subject.attrs.clearance=low priority:200
+policy deny-sensitive org1 deny read,write,delete document:sensitive:* subject.attrs.clearance!=high priority:50
 policy owner-access org1 allow read,write,delete document:* resource.owner_id=subject.id priority:50
 
 # Define roles: <id> <tenant> <name> <perms> [inherits:<roles>] [owner:<actions>]
-role admin org1 Administrator *:* 
+role admin org1 Administrator *:*
 role editor org1 Editor read:document:*,write:document:*,delete:document:*
 role viewer org1 Viewer read:*
 role owner org1 Owner read:* owner:read,write,delete,share

@@ -547,6 +547,8 @@ func parseExprMap(m map[string]any) Expr {
 		switch op {
 		case "eq":
 			return &EqExpr{Field: m["field"].(string), Value: m["value"]}
+		case "ne":
+			return &NeExpr{Field: m["field"].(string), Value: m["value"]}
 		case "in":
 			vals := m["values"].([]any)
 			return &InExpr{Field: m["field"].(string), Values: vals}

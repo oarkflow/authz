@@ -68,6 +68,17 @@ func ParseCondition(s string) (Expr, error) {
 		}
 	}
 
+	// inequality e.g., subject.id != "alice"
+	neRe := regexp.MustCompile(`(?P<left>[a-zA-Z0-9_\.]+)\s*!=\s*(?P<right>\"[^\"]+\"|[^\s]+)`)
+	if neRe.MatchString(s) {
+		m := neRe.FindStringSubmatch(s)
+		if len(m) >= 3 {
+			left := m[1]
+			right := strings.Trim(m[2], "\"")
+			return &NeExpr{Field: left, Value: right}, nil
+		}
+	}
+
 	return nil, fmt.Errorf("unsupported condition syntax: %s", s)
 }
 

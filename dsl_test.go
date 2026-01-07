@@ -2,6 +2,7 @@ package authz_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -14,7 +15,9 @@ func TestDSLParser(t *testing.T) {
 	dsl := `
 # Test configuration
 tenant org1 "Organization 1"
-tenant team1 "Team 1" parent:org1
+tenant team1 "Team 1" parent:"org1:dept1"
+tenant team2 "Team 2" parent:'org1:dept2'
+tenant team3 "Team 3" parent:` + "`" + `org1:dept3` + "`" + `
 
 policy p1 org1 allow read document:* subject.type=user priority:10
 policy p2 org1 deny delete document:* subject.roles@guest priority:20
@@ -36,8 +39,8 @@ engine cache_ttl=5000 batch_size=100
 		t.Fatal(err)
 	}
 
-	if len(cfg.Tenants) != 2 {
-		t.Errorf("expected 2 tenants, got %d", len(cfg.Tenants))
+	if len(cfg.Tenants) != 4 {
+		t.Errorf("expected 4 tenants, got %d", len(cfg.Tenants))
 	}
 	if len(cfg.Policies) != 2 {
 		t.Errorf("expected 2 policies, got %d", len(cfg.Policies))
@@ -50,6 +53,15 @@ engine cache_ttl=5000 batch_size=100
 	}
 	if len(cfg.Memberships) != 2 {
 		t.Errorf("expected 2 memberships, got %d", len(cfg.Memberships))
+	}
+	if cfg.Hierarchy["team1"] != "org1:dept1" {
+		t.Errorf("expected hierarchy team1=org1:dept1, got %s", cfg.Hierarchy["team1"])
+	}
+	if cfg.Hierarchy["team2"] != "org1:dept2" {
+		t.Errorf("expected hierarchy team2=org1:dept2, got %s", cfg.Hierarchy["team2"])
+	}
+	if cfg.Hierarchy["team3"] != "org1:dept3" {
+		t.Errorf("expected hierarchy team3=org1:dept3, got %s", cfg.Hierarchy["team3"])
 	}
 	if cfg.Engine.DecisionCacheTTL != 5000 {
 		t.Errorf("expected cache_ttl=5000, got %d", cfg.Engine.DecisionCacheTTL)
@@ -186,8 +198,84 @@ func TestDSLFromFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Logf("Loaded config: %d tenants, %d policies, %d roles", 
+	t.Logf("Loaded config: %d tenants, %d policies, %d roles",
 		len(cfg.Tenants), len(cfg.Policies), len(cfg.Roles))
+}
+
+func TestDenySensitivePolicy(t *testing.T) {
+	dsl := `
+tenant company "ACME Corp"
+
+policy allow-users company allow read,write document:* subject.type=user priority:10
+policy deny-sensitive company deny read,write,delete document:sensitive:* subject.attrs.clearance!=high priority:50
+
+role admin company Administrator *:*
+role viewer company Viewer read:*
+
+member user:alice admin
+member user:bob viewer
+
+engine cache_ttl=3000
+`
+
+	parser := authz.NewDSLParser()
+	cfg, err := parser.Parse([]byte(dsl))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	engine := authz.NewEngine(
+		stores.NewMemoryPolicyStore(),
+		stores.NewMemoryRoleStore(),
+		stores.NewMemoryACLStore(),
+		stores.NewMemoryAuditStore(),
+		authz.WithRoleMembershipStore(stores.NewMemoryRoleMembershipStore()),
+	)
+
+	ctx := context.Background()
+	if err := engine.ApplyConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	sensitiveDoc := &authz.Resource{
+		ID:       "doc-sensitive",
+		Type:     "document:sensitive",
+		TenantID: "company",
+	}
+
+	env := &authz.Environment{Time: time.Now(), TenantID: "company"}
+
+	tests := []struct {
+		name     string
+		subject  *authz.Subject
+		action   authz.Action
+		expected bool
+	}{
+		{
+			name:     "high-clearance",
+			subject:  &authz.Subject{ID: "user:alice", Type: "user", TenantID: "company", Roles: []string{"admin"}, Attrs: map[string]any{"clearance": "high"}},
+			action:   authz.Action("read"),
+			expected: true,
+		},
+		{
+			name:     "low-clearance",
+			subject:  &authz.Subject{ID: "user:bob", Type: "user", TenantID: "company", Roles: []string{"viewer"}, Attrs: map[string]any{"clearance": "low"}},
+			action:   authz.Action("read"),
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decision, err := engine.Authorize(ctx, tt.subject, tt.action, sensitiveDoc, env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision.Allowed != tt.expected {
+				t.Fatalf("expected allowed=%t for %s, got %t (reason=%s)", tt.expected, tt.name, decision.Allowed, decision.Reason)
+			}
+		})
+	}
 }
 
 func ExampleDSLParser() {
@@ -200,18 +288,13 @@ engine cache_ttl=5000
 `
 
 	parser := authz.NewDSLParser()
-	cfg, _ := parser.Parse([]byte(dsl))
+	cfg, err := parser.Parse([]byte(dsl))
+	if err != nil {
+		panic(err)
+	}
 
-	// Convert to binary
-	encoder := authz.NewBinaryEncoder()
-	binary, _ := encoder.Encode(cfg)
-
-	// Decode binary
-	decoder := authz.NewBinaryDecoder(binary)
-	decoded, _ := decoder.Decode()
-
-	println("Tenants:", len(decoded.Tenants))
-	println("Policies:", len(decoded.Policies))
+	fmt.Println("Tenants:", len(cfg.Tenants))
+	fmt.Println("Policies:", len(cfg.Policies))
 	// Output:
 	// Tenants: 1
 	// Policies: 1

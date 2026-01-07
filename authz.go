@@ -156,6 +156,24 @@ type Policy struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// UnmarshalYAML implements custom YAML unmarshaling for Policy
+func (p *Policy) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type Alias Policy
+	aux := &struct {
+		Condition map[string]interface{} `yaml:"condition"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := unmarshal(aux); err != nil {
+		return err
+	}
+	if aux.Condition != nil {
+		p.Condition = parseExprMap(aux.Condition)
+	}
+	return nil
+}
+
 // Checksum returns a deterministic hash of the policy
 func (p *Policy) Checksum() string {
 	data, _ := json.Marshal(struct {
@@ -325,6 +343,29 @@ func (e *EqExpr) Evaluate(ctx *EvalContext) (bool, error) {
 
 func (e *EqExpr) String() string {
 	return fmt.Sprintf("%s == %v", e.Field, e.Value)
+}
+
+// NeExpr represents inequality check
+type NeExpr struct {
+	Field string
+	Value any
+}
+
+func (e *NeExpr) Evaluate(ctx *EvalContext) (bool, error) {
+	val := getField(ctx, e.Field)
+	// Support value references like "subject.id" by resolving them
+	switch v := e.Value.(type) {
+	case string:
+		if v == "action" || len(v) > 8 && (v[:8] == "subject." || v[:9] == "resource." || v[:4] == "env.") {
+			res := getField(ctx, v)
+			return compare(val, res) != 0, nil
+		}
+	}
+	return compare(val, e.Value) != 0, nil
+}
+
+func (e *NeExpr) String() string {
+	return fmt.Sprintf("%s != %v", e.Field, e.Value)
 }
 
 // InExpr represents membership check
@@ -646,6 +687,7 @@ const (
 	OP_PUSH_FIELD OpCode = iota
 	OP_PUSH_CONST
 	OP_EQ
+	OP_NE
 	OP_IN
 	OP_GTE
 	OP_AND
@@ -696,6 +738,10 @@ func (bc *Bytecode) Eval(ctx *EvalContext) (bool, error) {
 			b := pop()
 			a := pop()
 			push(compare(a, b) == 0)
+		case OP_NE:
+			b := pop()
+			a := pop()
+			push(compare(a, b) != 0)
 		case OP_IN:
 			set := pop()
 			val := pop()
@@ -833,6 +879,11 @@ func compileToBytecode(e Expr) *Bytecode {
 			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_EQ}, args: []interface{}{v.Field, rv}}
 		}
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_EQ}, args: []interface{}{v.Field, v.Value}}
+	case *NeExpr:
+		if rv, ok := v.Value.(string); ok && (rv == "action" || (len(rv) > 4 && (rv[:8] == "subject." || rv[:9] == "resource." || rv[:4] == "env."))) {
+			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_NE}, args: []interface{}{v.Field, rv}}
+		}
+		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_NE}, args: []interface{}{v.Field, v.Value}}
 	case *InExpr:
 		vals := make([]interface{}, len(v.Values))
 		copy(vals, v.Values)

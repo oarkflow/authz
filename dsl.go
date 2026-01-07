@@ -40,40 +40,48 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 
 	for _, t := range cfg.Tenants {
 		e.buf = append(e.buf, "tenant "...)
+		e.buf = append(e.buf, '"')
 		e.buf = append(e.buf, t.ID...)
-		e.buf = append(e.buf, " \""...)
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, t.Name...)
 		e.buf = append(e.buf, '"')
 		if t.Parent != "" {
-			e.buf = append(e.buf, " parent:"...)
+			e.buf = append(e.buf, " parent:\""...)
 			e.buf = append(e.buf, t.Parent...)
+			e.buf = append(e.buf, '"')
 		}
 		e.buf = append(e.buf, '\n')
 	}
 
 	for _, p := range cfg.Policies {
 		e.buf = append(e.buf, "policy "...)
+		e.buf = append(e.buf, '"')
 		e.buf = append(e.buf, p.ID...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, p.TenantID...)
-		e.buf = append(e.buf, ' ')
-		e.buf = append(e.buf, p.Effect...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, string(p.Effect)...)
+		e.buf = append(e.buf, `" "`...)
+		actionsStr := ""
 		for i, a := range p.Actions {
 			if i > 0 {
-				e.buf = append(e.buf, ',')
+				actionsStr += ","
 			}
-			e.buf = append(e.buf, a...)
+			actionsStr += string(a)
 		}
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, actionsStr...)
+		e.buf = append(e.buf, `" "`...)
+		resourcesStr := ""
 		for i, r := range p.Resources {
 			if i > 0 {
-				e.buf = append(e.buf, ',')
+				resourcesStr += ","
 			}
-			e.buf = append(e.buf, r...)
+			resourcesStr += r
 		}
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, resourcesStr...)
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, p.Condition.String()...)
+		e.buf = append(e.buf, '"')
 		if p.Priority != 0 {
 			e.buf = append(e.buf, " priority:"...)
 			n := strconv.AppendInt(tmp[:0], int64(p.Priority), 10)
@@ -84,104 +92,113 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 
 	for _, r := range cfg.Roles {
 		e.buf = append(e.buf, "role "...)
+		e.buf = append(e.buf, '"')
 		e.buf = append(e.buf, r.ID...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, r.TenantID...)
-		e.buf = append(e.buf, ' ')
-		if strings.Contains(r.Name, " ") {
-			e.buf = append(e.buf, '"')
-			e.buf = append(e.buf, r.Name...)
-			e.buf = append(e.buf, '"')
-		} else {
-			e.buf = append(e.buf, r.Name...)
-		}
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, r.Name...)
+		e.buf = append(e.buf, `" "`...)
+		permsStr := ""
 		for i, p := range r.Permissions {
 			if i > 0 {
-				e.buf = append(e.buf, ',')
+				permsStr += ","
 			}
-			e.buf = append(e.buf, p.Action...)
-			e.buf = append(e.buf, ':')
-			e.buf = append(e.buf, p.Resource...)
+			permsStr += string(p.Action) + ":" + p.Resource
 		}
+		e.buf = append(e.buf, permsStr...)
+		e.buf = append(e.buf, '"')
 		if len(r.Inherits) > 0 {
-			e.buf = append(e.buf, " inherits:"...)
+			e.buf = append(e.buf, " inherits:\""...)
 			for i, inh := range r.Inherits {
 				if i > 0 {
 					e.buf = append(e.buf, ',')
 				}
 				e.buf = append(e.buf, inh...)
 			}
+			e.buf = append(e.buf, '"')
 		}
 		if len(r.OwnerAllowedActions) > 0 {
-			e.buf = append(e.buf, " owner:"...)
+			e.buf = append(e.buf, " owner:\""...)
 			for i, a := range r.OwnerAllowedActions {
 				if i > 0 {
 					e.buf = append(e.buf, ',')
 				}
-				e.buf = append(e.buf, a...)
+				e.buf = append(e.buf, string(a)...)
 			}
+			e.buf = append(e.buf, '"')
 		}
 		e.buf = append(e.buf, '\n')
 	}
 
 	for _, acl := range cfg.ACLs {
 		e.buf = append(e.buf, "acl "...)
+		e.buf = append(e.buf, '"')
 		e.buf = append(e.buf, acl.ID...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, acl.ResourceID...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, acl.SubjectID...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
+		actionsStr := ""
 		for i, a := range acl.Actions {
 			if i > 0 {
-				e.buf = append(e.buf, ',')
+				actionsStr += ","
 			}
-			e.buf = append(e.buf, a...)
+			actionsStr += string(a)
 		}
-		e.buf = append(e.buf, ' ')
-		e.buf = append(e.buf, acl.Effect...)
+		e.buf = append(e.buf, actionsStr...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, string(acl.Effect)...)
+		e.buf = append(e.buf, '"')
 		if !acl.ExpiresAt.IsZero() {
-			e.buf = append(e.buf, " expires:"...)
+			e.buf = append(e.buf, " expires:\""...)
 			e.buf = append(e.buf, acl.ExpiresAt.Format(time.RFC3339)...)
+			e.buf = append(e.buf, '"')
 		}
 		e.buf = append(e.buf, '\n')
 	}
 
 	for _, m := range cfg.Memberships {
 		e.buf = append(e.buf, "member "...)
+		e.buf = append(e.buf, '"')
 		e.buf = append(e.buf, m.SubjectID...)
-		e.buf = append(e.buf, ' ')
+		e.buf = append(e.buf, `" "`...)
 		e.buf = append(e.buf, m.RoleID...)
-		e.buf = append(e.buf, '\n')
+		e.buf = append(e.buf, "\"\n"...)
 	}
 
-	if cfg.Engine.DecisionCacheTTL > 0 || cfg.Engine.AuditBatchSize > 0 {
+	if cfg.Engine.DecisionCacheTTL > 0 || cfg.Engine.AttributeCacheTTL > 0 || cfg.Engine.AuditBatchSize > 0 || cfg.Engine.AuditFlushInterval > 0 || cfg.Engine.BatchWorkerCount > 0 {
 		e.buf = append(e.buf, "engine"...)
 		if cfg.Engine.DecisionCacheTTL > 0 {
-			e.buf = append(e.buf, " cache_ttl="...)
+			e.buf = append(e.buf, " cache_ttl=\""...)
 			n := strconv.AppendInt(tmp[:0], cfg.Engine.DecisionCacheTTL, 10)
 			e.buf = append(e.buf, n...)
+			e.buf = append(e.buf, '"')
 		}
 		if cfg.Engine.AttributeCacheTTL > 0 {
-			e.buf = append(e.buf, " attr_ttl="...)
+			e.buf = append(e.buf, " attr_ttl=\""...)
 			n := strconv.AppendInt(tmp[:0], cfg.Engine.AttributeCacheTTL, 10)
 			e.buf = append(e.buf, n...)
+			e.buf = append(e.buf, '"')
 		}
 		if cfg.Engine.AuditBatchSize > 0 {
-			e.buf = append(e.buf, " batch_size="...)
+			e.buf = append(e.buf, " batch_size=\""...)
 			n := strconv.AppendInt(tmp[:0], int64(cfg.Engine.AuditBatchSize), 10)
 			e.buf = append(e.buf, n...)
+			e.buf = append(e.buf, '"')
 		}
 		if cfg.Engine.AuditFlushInterval > 0 {
-			e.buf = append(e.buf, " flush_interval="...)
+			e.buf = append(e.buf, " flush_interval=\""...)
 			n := strconv.AppendInt(tmp[:0], cfg.Engine.AuditFlushInterval, 10)
 			e.buf = append(e.buf, n...)
+			e.buf = append(e.buf, '"')
 		}
 		if cfg.Engine.BatchWorkerCount > 0 {
-			e.buf = append(e.buf, " workers="...)
+			e.buf = append(e.buf, " workers=\""...)
 			n := strconv.AppendInt(tmp[:0], int64(cfg.Engine.BatchWorkerCount), 10)
 			e.buf = append(e.buf, n...)
+			e.buf = append(e.buf, '"')
 		}
 		e.buf = append(e.buf, '\n')
 	}
@@ -262,21 +279,19 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 func splitLineBytes(line []byte) []string {
 	parts := make([]string, 0, 8)
 	var start int
-	inQuote := false
+	var quoteChar byte
 	i := 0
 
 	for i < len(line) {
 		ch := line[i]
-		if ch == '"' {
-			if inQuote {
-				parts = append(parts, string(line[start:i]))
-				start = i + 1
-				inQuote = false
-			} else {
-				start = i + 1
-				inQuote = true
-			}
-		} else if (ch == ' ' || ch == '\t') && !inQuote {
+		if (ch == '"' || ch == '\'' || ch == '`') && quoteChar == 0 && (i == start || line[i-1] == ' ' || line[i-1] == '\t') {
+			quoteChar = ch
+			start = i + 1
+		} else if ch == quoteChar {
+			parts = append(parts, string(line[start:i]))
+			start = i + 1
+			quoteChar = 0
+		} else if (ch == ' ' || ch == '\t') && quoteChar == 0 {
 			if i > start {
 				parts = append(parts, string(line[start:i]))
 			}
@@ -292,14 +307,25 @@ func splitLineBytes(line []byte) []string {
 	return parts
 }
 
+func parseQuotedString(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') ||
+			(s[0] == '\'' && s[len(s)-1] == '\'') ||
+			(s[0] == '`' && s[len(s)-1] == '`') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
+}
+
 func (p *DSLParser) parseTenant(cfg *Config, parts []string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("tenant requires: <id> <name> [parent:<id>]")
 	}
-	t := TenantConfig{ID: parts[0], Name: parts[1]}
+	t := TenantConfig{ID: parseQuotedString(parts[0]), Name: parseQuotedString(parts[1])}
 	for _, opt := range parts[2:] {
 		if strings.HasPrefix(opt, "parent:") {
-			t.Parent = opt[7:]
+			t.Parent = parseQuotedString(opt[7:])
 			cfg.Hierarchy[t.ID] = t.Parent
 		}
 	}
@@ -313,12 +339,12 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 	}
 
 	pol := &Policy{
-		ID:        parts[0],
-		TenantID:  parts[1],
-		Effect:    Effect(parts[2]),
-		Actions:   parseList(parts[3]),
-		Resources: strings.Split(parts[4], ","),
-		Condition: parseCondition(parts[5]),
+		ID:        parseQuotedString(parts[0]),
+		TenantID:  parseQuotedString(parts[1]),
+		Effect:    Effect(parseQuotedString(parts[2])),
+		Actions:   parseList(parseQuotedString(parts[3])),
+		Resources: strings.Split(parseQuotedString(parts[4]), ","),
+		Condition: parseCondition(parseQuotedString(parts[5])),
 		Priority:  0,
 		Enabled:   true,
 		CreatedAt: time.Now(),
@@ -341,10 +367,10 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 	}
 
 	role := &Role{
-		ID:                  parts[0],
-		TenantID:            parts[1],
-		Name:                parts[2],
-		Permissions:         parsePermissions(parts[3]),
+		ID:                  parseQuotedString(parts[0]),
+		TenantID:            parseQuotedString(parts[1]),
+		Name:                parseQuotedString(parts[2]),
+		Permissions:         parsePermissions(parseQuotedString(parts[3])),
 		OwnerAllowedActions: []Action{},
 		Inherits:            []string{},
 		CreatedAt:           time.Now(),
@@ -352,9 +378,9 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 
 	for _, opt := range parts[4:] {
 		if strings.HasPrefix(opt, "inherits:") {
-			role.Inherits = strings.Split(opt[9:], ",")
+			role.Inherits = strings.Split(parseQuotedString(opt[9:]), ",")
 		} else if strings.HasPrefix(opt, "owner:") {
-			for _, a := range strings.Split(opt[6:], ",") {
+			for _, a := range strings.Split(parseQuotedString(opt[6:]), ",") {
 				role.OwnerAllowedActions = append(role.OwnerAllowedActions, Action(a))
 			}
 		}
@@ -370,11 +396,11 @@ func (p *DSLParser) parseACL(cfg *Config, parts []string) error {
 	}
 
 	acl := &ACL{
-		ID:         parts[0],
-		ResourceID: parts[1],
-		SubjectID:  parts[2],
-		Actions:    parseList(parts[3]),
-		Effect:     Effect(parts[4]),
+		ID:         parseQuotedString(parts[0]),
+		ResourceID: parseQuotedString(parts[1]),
+		SubjectID:  parseQuotedString(parts[2]),
+		Actions:    parseList(parseQuotedString(parts[3])),
+		Effect:     Effect(parseQuotedString(parts[4])),
 		CreatedAt:  time.Now(),
 	}
 
@@ -393,8 +419,8 @@ func (p *DSLParser) parseMember(cfg *Config, parts []string) error {
 		return fmt.Errorf("member requires: <subject> <role>")
 	}
 	cfg.Memberships = append(cfg.Memberships, RoleMembership{
-		SubjectID: parts[0],
-		RoleID:    parts[1],
+		SubjectID: parseQuotedString(parts[0]),
+		RoleID:    parseQuotedString(parts[1]),
 	})
 	return nil
 }
@@ -405,7 +431,7 @@ func (p *DSLParser) parseEngine(cfg *Config, parts []string) error {
 		if idx == -1 {
 			continue
 		}
-		key, val := kv[:idx], kv[idx+1:]
+		key, val := kv[:idx], parseQuotedString(kv[idx+1:])
 		switch key {
 		case "cache_ttl":
 			cfg.Engine.DecisionCacheTTL, _ = strconv.ParseInt(val, 10, 64)
@@ -421,7 +447,6 @@ func (p *DSLParser) parseEngine(cfg *Config, parts []string) error {
 	}
 	return nil
 }
-
 
 func parseList(s string) []Action {
 	if s == "" {
@@ -486,6 +511,9 @@ func parseCondition(s string) Expr {
 		return &TrueExpr{}
 	}
 	for i := 0; i < len(s); i++ {
+		if i+1 < len(s) && s[i:i+2] == "!=" {
+			return &NeExpr{Field: s[:i], Value: s[i+2:]}
+		}
 		if s[i] == '=' {
 			return &EqExpr{Field: s[:i], Value: s[i+1:]}
 		}

@@ -7,6 +7,7 @@ replace github.com/oarkflow/authz => ../
 require (
 	github.com/gofiber/fiber/v2 v2.52.10
 	github.com/oarkflow/authz v0.0.0-00010101000000-000000000000
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
