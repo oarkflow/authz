@@ -76,7 +76,7 @@ func (s *MemoryPolicyStore) ListPolicies(ctx context.Context, tenantID string) (
 	defer s.mu.RUnlock()
 	result := make([]*authz.Policy, 0)
 	for _, p := range s.policies {
-		if p.TenantID == tenantID || p.TenantID == "" {
+		if tenantID == "" || p.TenantID == tenantID || p.TenantID == "" {
 			result = append(result, p)
 		}
 	}
@@ -199,6 +199,43 @@ func (s *MemoryACLStore) RevokeACL(ctx context.Context, id string) error {
 	delete(s.acls, id)
 	go s.rebuildACLSnapshot()
 	return nil
+}
+
+func (s *MemoryACLStore) GetACL(ctx context.Context, id string) (*authz.ACL, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	acl, ok := s.acls[id]
+	if !ok {
+		return nil, fmt.Errorf("acl not found: %s", id)
+	}
+	return cloneACL(acl), nil
+}
+
+func (s *MemoryACLStore) UpdateACL(ctx context.Context, acl *authz.ACL) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.acls[acl.ID]; !ok {
+		return fmt.Errorf("acl not found: %s", acl.ID)
+	}
+	s.acls[acl.ID] = acl
+	go s.rebuildACLSnapshot()
+	return nil
+}
+
+func (s *MemoryACLStore) ListACLs(ctx context.Context, tenantID string) ([]*authz.ACL, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]*authz.ACL, 0)
+	for _, acl := range s.acls {
+		if acl.IsExpired() {
+			continue
+		}
+		// If tenantID is empty, return all ACLs; otherwise filter by tenantID
+		if tenantID == "" || acl.TenantID == tenantID {
+			result = append(result, cloneACL(acl))
+		}
+	}
+	return result, nil
 }
 
 func (s *MemoryACLStore) Close() {
@@ -383,4 +420,67 @@ func (m *MemoryRoleMembershipStore) ListRoles(ctx context.Context, subjectID str
 		}
 	}
 	return out, nil
+}
+
+// MemoryTenantStore implements in-memory tenant persistence
+type MemoryTenantStore struct {
+	mu      sync.RWMutex
+	tenants map[string]*authz.Tenant
+}
+
+func NewMemoryTenantStore() *MemoryTenantStore {
+	return &MemoryTenantStore{tenants: make(map[string]*authz.Tenant)}
+}
+
+func (s *MemoryTenantStore) CreateTenant(ctx context.Context, tenant *authz.Tenant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.tenants[tenant.ID]; exists {
+		return fmt.Errorf("tenant already exists: %s", tenant.ID)
+	}
+	tenant.CreatedAt = time.Now()
+	tenant.UpdatedAt = tenant.CreatedAt
+	s.tenants[tenant.ID] = tenant
+	return nil
+}
+
+func (s *MemoryTenantStore) UpdateTenant(ctx context.Context, tenant *authz.Tenant) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.tenants[tenant.ID]; !ok {
+		return fmt.Errorf("tenant not found: %s", tenant.ID)
+	}
+	tenant.UpdatedAt = time.Now()
+	s.tenants[tenant.ID] = tenant
+	return nil
+}
+
+func (s *MemoryTenantStore) DeleteTenant(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.tenants, id)
+	return nil
+}
+
+func (s *MemoryTenantStore) GetTenant(ctx context.Context, id string) (*authz.Tenant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	tenant, ok := s.tenants[id]
+	if !ok {
+		return nil, fmt.Errorf("tenant not found: %s", id)
+	}
+	// Return a copy to avoid mutation
+	copy := *tenant
+	return &copy, nil
+}
+
+func (s *MemoryTenantStore) ListTenants(ctx context.Context) ([]*authz.Tenant, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]*authz.Tenant, 0, len(s.tenants))
+	for _, t := range s.tenants {
+		copy := *t
+		result = append(result, &copy)
+	}
+	return result, nil
 }

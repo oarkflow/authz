@@ -1,5 +1,9 @@
 # AuthZ DSL Configuration
 # Syntax: <directive> <args...> [options...]
+#
+# Note: This file represents the initial static configuration.
+# The system supports dynamic updates (Tenants, Policies, ACLs, Roles)
+# at runtime via the Engine API or Admin HTTP Server.
 
 # Define tenants
 tenant root "Root Organization"

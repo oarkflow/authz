@@ -577,6 +577,7 @@ type Permission struct {
 // ACL represents resource-specific access control
 type ACL struct {
 	ID         string    `json:"id"`
+	TenantID   string    `json:"tenant_id,omitempty"`
 	ResourceID string    `json:"resource_id"`
 	SubjectID  string    `json:"subject_id"`
 	Actions    []Action  `json:"actions"`
@@ -617,8 +618,30 @@ type RoleStore interface {
 type ACLStore interface {
 	GrantACL(ctx context.Context, acl *ACL) error
 	RevokeACL(ctx context.Context, id string) error
+	GetACL(ctx context.Context, id string) (*ACL, error)
+	UpdateACL(ctx context.Context, acl *ACL) error
+	ListACLs(ctx context.Context, tenantID string) ([]*ACL, error)
 	ListACLsByResource(ctx context.Context, resourceID string) ([]*ACL, error)
 	ListACLsBySubject(ctx context.Context, subjectID string) ([]*ACL, error)
+}
+
+// TenantStore manages tenant persistence
+type TenantStore interface {
+	CreateTenant(ctx context.Context, tenant *Tenant) error
+	UpdateTenant(ctx context.Context, tenant *Tenant) error
+	DeleteTenant(ctx context.Context, id string) error
+	GetTenant(ctx context.Context, id string) (*Tenant, error)
+	ListTenants(ctx context.Context) ([]*Tenant, error)
+}
+
+// Tenant represents an organization/tenant
+type Tenant struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	ParentID  string         `json:"parent_id,omitempty"`
+	Attrs     map[string]any `json:"attrs,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
 }
 
 // AuditStore manages audit logs
@@ -1362,6 +1385,7 @@ type Engine struct {
 	roleStore           RoleStore
 	aclStore            ACLStore
 	auditStore          AuditStore
+	tenantStore         TenantStore
 	policyIndex         *PolicyIndex
 	roleCache           sync.Map
 	decisionCache       map[DecisionKey]*DecisionCacheEntry
@@ -1401,6 +1425,13 @@ func WithRistretto(numCounters int64, maxCost int64, bufferItems int64) EngineOp
 func WithRoleMembershipStore(s RoleMembershipStore) EngineOption {
 	return func(e *Engine) error {
 		e.SetRoleMembershipStore(s)
+		return nil
+	}
+}
+
+func WithTenantStore(s TenantStore) EngineOption {
+	return func(e *Engine) error {
+		e.tenantStore = s
 		return nil
 	}
 }
@@ -2584,6 +2615,7 @@ func (e *Engine) CreatePolicy(ctx context.Context, policy *Policy) error {
 	if err == nil {
 		e.InvalidateDecisionCache()
 		e.notifyBundleDistributor(policy.TenantID)
+		e.ReloadPolicies(ctx, "")
 	}
 	return err
 }
@@ -2599,6 +2631,7 @@ func (e *Engine) UpdatePolicy(ctx context.Context, policy *Policy) error {
 	if err == nil {
 		e.InvalidateDecisionCache()
 		e.notifyBundleDistributor(policy.TenantID)
+		e.ReloadPolicies(ctx, "")
 	}
 	return err
 }
@@ -2612,6 +2645,7 @@ func (e *Engine) DeletePolicy(ctx context.Context, id string) error {
 	if err == nil {
 		e.InvalidateDecisionCache()
 		e.notifyBundleDistributor(tenantID)
+		e.ReloadPolicies(ctx, "")
 	}
 	return err
 }
@@ -3021,6 +3055,53 @@ func (e *Engine) RevokeRole(ctx context.Context, subject *Subject, roleID string
 }
 
 // ============================================================================
+// TENANT OPERATIONS
+// ============================================================================
+
+func (e *Engine) CreateTenant(ctx context.Context, tenant *Tenant) error {
+	if e.tenantStore == nil {
+		return fmt.Errorf("tenant store not configured")
+	}
+	if err := e.tenantStore.CreateTenant(ctx, tenant); err != nil {
+		return err
+	}
+	if e.tenantResolver != nil {
+		if memResolver, ok := e.tenantResolver.(*MemoryTenantResolver); ok && tenant.ParentID != "" {
+			memResolver.AddParent(tenant.ID, tenant.ParentID)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) UpdateTenant(ctx context.Context, tenant *Tenant) error {
+	if e.tenantStore == nil {
+		return fmt.Errorf("tenant store not configured")
+	}
+	return e.tenantStore.UpdateTenant(ctx, tenant)
+}
+
+func (e *Engine) DeleteTenant(ctx context.Context, id string) error {
+	if e.tenantStore == nil {
+		return fmt.Errorf("tenant store not configured")
+	}
+	return e.tenantStore.DeleteTenant(ctx, id)
+}
+
+func (e *Engine) GetTenant(ctx context.Context, id string) (*Tenant, error) {
+	if e.tenantStore == nil {
+		return nil, fmt.Errorf("tenant store not configured")
+	}
+	return e.tenantStore.GetTenant(ctx, id)
+}
+
+func (e *Engine) ListTenants(ctx context.Context) ([]*Tenant, error) {
+	if e.tenantStore == nil {
+		return nil, fmt.Errorf("tenant store not configured")
+	}
+	return e.tenantStore.ListTenants(ctx)
+}
+
+// ============================================================================
 // ACL OPERATIONS
 // ============================================================================
 
@@ -3038,6 +3119,22 @@ func (e *Engine) RevokeACL(ctx context.Context, id string) error {
 		e.InvalidateDecisionCache()
 	}
 	return err
+}
+
+func (e *Engine) GetACL(ctx context.Context, id string) (*ACL, error) {
+	return e.aclStore.GetACL(ctx, id)
+}
+
+func (e *Engine) UpdateACL(ctx context.Context, acl *ACL) error {
+	err := e.aclStore.UpdateACL(ctx, acl)
+	if err == nil {
+		e.InvalidateDecisionCache()
+	}
+	return err
+}
+
+func (e *Engine) ListACLs(ctx context.Context, tenantID string) ([]*ACL, error) {
+	return e.aclStore.ListACLs(ctx, tenantID)
 }
 
 func (e *Engine) ExpireACL(ctx context.Context, id string, expiresAt time.Time) error {

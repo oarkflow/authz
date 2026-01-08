@@ -78,6 +78,7 @@ func NewAdminHTTPServer(engine *Engine, opts ...AdminHTTPOption) *AdminHTTPServe
 
 func (s *AdminHTTPServer) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
+	s.mux.HandleFunc("/tenants", s.handleTenantsRoot)
 	s.mux.HandleFunc("/tenants/", s.handleTenants)
 }
 
@@ -116,6 +117,45 @@ func (s *AdminHTTPServer) handleHealthz(w http.ResponseWriter, r *http.Request) 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (s *AdminHTTPServer) handleTenantsRoot(w http.ResponseWriter, r *http.Request) {
+	if err := s.authorize(r); err != nil {
+		respondError(w, http.StatusUnauthorized, err)
+		return
+	}
+	if r.URL.Path != "/tenants" && r.URL.Path != "/tenants/" {
+		s.handleTenants(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		tenants, err := s.engine.ListTenants(r.Context())
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"tenants": tenants})
+	case http.MethodPost:
+		defer r.Body.Close()
+		var t Tenant
+		if err := decodeJSON(r, &t); err != nil {
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		if t.ID == "" {
+			respondError(w, http.StatusBadRequest, errors.New("tenant id required"))
+			return
+		}
+		if err := s.engine.CreateTenant(r.Context(), &t); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusCreated, t)
+	default:
+		w.Header().Set("Allow", "GET,POST")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *AdminHTTPServer) handleTenants(w http.ResponseWriter, r *http.Request) {
 	if err := s.authorize(r); err != nil {
 		respondError(w, http.StatusUnauthorized, err)
@@ -127,7 +167,38 @@ func (s *AdminHTTPServer) handleTenants(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if len(remainder) == 0 {
-		respondError(w, http.StatusNotFound, errors.New("resource not specified"))
+		// Operations on the tenant itself
+		switch r.Method {
+		case http.MethodGet:
+			t, err := s.engine.GetTenant(r.Context(), tenantID)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, err)
+				return
+			}
+			respondJSON(w, http.StatusOK, t)
+		case http.MethodPut:
+			defer r.Body.Close()
+			var t Tenant
+			if err := decodeJSON(r, &t); err != nil {
+				respondError(w, http.StatusBadRequest, err)
+				return
+			}
+			t.ID = tenantID
+			if err := s.engine.UpdateTenant(r.Context(), &t); err != nil {
+				respondError(w, http.StatusInternalServerError, err)
+				return
+			}
+			respondJSON(w, http.StatusOK, t)
+		case http.MethodDelete:
+			if err := s.engine.DeleteTenant(r.Context(), tenantID); err != nil {
+				respondError(w, http.StatusInternalServerError, err)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.Header().Set("Allow", "GET,PUT,DELETE")
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}
 		return
 	}
 	switch remainder[0] {
@@ -135,6 +206,10 @@ func (s *AdminHTTPServer) handleTenants(w http.ResponseWriter, r *http.Request) 
 		s.handlePolicies(w, r, tenantID, remainder[1:])
 	case "roles":
 		s.handleRoles(w, r, tenantID, remainder[1:])
+	case "acls":
+		s.handleACLs(w, r, tenantID, remainder[1:])
+	case "members":
+		s.handleMembers(w, r, tenantID, remainder[1:])
 	case "explain":
 		s.handleExplain(w, r, tenantID)
 	case "batch":
@@ -443,6 +518,137 @@ type rolePayload struct {
 	Permissions         []permissionPayload `json:"permissions"`
 	Inherits            []string            `json:"inherits"`
 	OwnerAllowedActions []Action            `json:"owner_allowed_actions"`
+}
+
+func (s *AdminHTTPServer) handleACLs(w http.ResponseWriter, r *http.Request, tenantID string, parts []string) {
+	switch r.Method {
+	case http.MethodGet:
+		if len(parts) == 0 {
+			// List
+			acls, err := s.engine.ListACLs(r.Context(), tenantID)
+			if err != nil {
+				respondError(w, http.StatusInternalServerError, err)
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]any{"acls": acls})
+		} else {
+			// Get
+			acl, err := s.engine.GetACL(r.Context(), parts[0])
+			if err != nil {
+				respondError(w, http.StatusNotFound, err)
+				return
+			}
+			if acl.TenantID != "" && acl.TenantID != tenantID {
+				respondError(w, http.StatusNotFound, errors.New("acl not found in tenant"))
+				return
+			}
+			respondJSON(w, http.StatusOK, acl)
+		}
+	case http.MethodPost:
+		if len(parts) != 0 {
+			respondError(w, http.StatusNotFound, errors.New("acl id should not be in path for create"))
+			return
+		}
+		defer r.Body.Close()
+		var acl ACL
+		if err := decodeJSON(r, &acl); err != nil {
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		if acl.ID == "" {
+			acl.ID = fmt.Sprintf("acl-%d", time.Now().UnixNano())
+		}
+		acl.TenantID = tenantID
+		if err := s.engine.GrantACL(r.Context(), &acl); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusCreated, acl)
+	case http.MethodPut:
+		if len(parts) == 0 {
+			respondError(w, http.StatusNotFound, errors.New("acl id required"))
+			return
+		}
+		defer r.Body.Close()
+		var acl ACL
+		if err := decodeJSON(r, &acl); err != nil {
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		acl.ID = parts[0]
+		acl.TenantID = tenantID
+		if err := s.engine.UpdateACL(r.Context(), &acl); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, acl)
+	case http.MethodDelete:
+		if len(parts) == 0 {
+			respondError(w, http.StatusNotFound, errors.New("acl id required"))
+			return
+		}
+		// Optional: check tenant ownership if needed, but ID is unique
+		if err := s.engine.RevokeACL(r.Context(), parts[0]); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		w.Header().Set("Allow", "GET,POST,PUT,DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *AdminHTTPServer) handleMembers(w http.ResponseWriter, r *http.Request, tenantID string, parts []string) {
+	// Pattern: /tenants/{tid}/members/{subjectID}/roles [POST, GET]
+	//          /tenants/{tid}/members/{subjectID}/roles/{roleID} [DELETE]
+	if len(parts) < 2 || parts[1] != "roles" {
+		http.NotFound(w, r)
+		return
+	}
+	subjectID := parts[0]
+
+	switch r.Method {
+	case http.MethodGet:
+		roles, err := s.engine.ListRolesForUser(r.Context(), subjectID)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"roles": roles})
+	case http.MethodPost:
+		defer r.Body.Close()
+		var payload struct {
+			RoleID string `json:"role_id"`
+		}
+		if err := decodeJSON(r, &payload); err != nil {
+			respondError(w, http.StatusBadRequest, err)
+			return
+		}
+		if payload.RoleID == "" {
+			respondError(w, http.StatusBadRequest, errors.New("role_id required"))
+			return
+		}
+		if err := s.engine.AssignRoleToUser(r.Context(), subjectID, payload.RoleID); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	case http.MethodDelete:
+		if len(parts) < 3 {
+			respondError(w, http.StatusNotFound, errors.New("role id required"))
+			return
+		}
+		roleID := parts[2]
+		if err := s.engine.RevokeRoleFromUser(r.Context(), subjectID, roleID); err != nil {
+			respondError(w, http.StatusInternalServerError, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		w.Header().Set("Allow", "GET,POST,DELETE")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
 }
 
 type permissionPayload struct {
