@@ -68,6 +68,36 @@ engine cache_ttl=5000 batch_size=100
 	}
 }
 
+func TestDSLHTTPRoutePermissions(t *testing.T) {
+	dsl := `
+tenant org1 "Organization 1"
+
+policy owner-route org1 allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
+policy admin-routes org1 allow GET,POST route:* subject.roles@admin priority:90
+
+role route-admin org1 "Route Administrator" GET:route:GET:/admin/*,POST:route:POST:/admin/*
+acl public-info route:GET:/public/info guest GET allow
+
+member user:erin route-admin
+`
+
+	parser := authz.NewDSLParser()
+	cfg, err := parser.Parse([]byte(dsl))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := cfg.Policies[0].Resources[0]; got != "route:GET:/users/*" {
+		t.Fatalf("route policy resource mismatch: got %q", got)
+	}
+	if got := cfg.Roles[0].Permissions[0].Resource; got != "route:GET:/admin/*" {
+		t.Fatalf("route role resource mismatch: got %q", got)
+	}
+	if got := cfg.ACLs[0].ResourceID; got != "route:GET:/public/info" {
+		t.Fatalf("route ACL resource mismatch: got %q", got)
+	}
+}
+
 func TestBinaryProtocol(t *testing.T) {
 	cfg := &authz.Config{
 		Version: 1,

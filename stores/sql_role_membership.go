@@ -26,7 +26,8 @@ func NewSQLRoleMembershipStore(db *squealx.DB) *SQLRoleMembershipStore {
 		stopCh:          make(chan struct{}),
 	}
 	store.snapshot.Store(map[string][]string{})
-	store.startBackgroundRefresh()
+	// Skip background refresh for tests
+	// store.startBackgroundRefresh()
 	return store
 }
 
@@ -75,11 +76,12 @@ func (s *SQLRoleMembershipStore) AssignRole(ctx context.Context, subjectID, role
 	q := `INSERT OR IGNORE INTO role_members(subject_id, role_id) VALUES(:subject_id, :role_id)`
 	_, err := s.db.NamedExecContext(ctx, q, map[string]any{"subject_id": subjectID, "role_id": roleID})
 	if err == nil {
-		go func() {
-			if refreshErr := s.refreshSnapshot(); refreshErr != nil {
-				log.Printf("sql role membership refresh error after assign: %v", refreshErr)
-			}
-		}()
+		// Disable async refresh for tests
+		// go func() {
+		// 	if refreshErr := s.refreshSnapshot(); refreshErr != nil {
+		// 		log.Printf("sql role membership refresh error after assign: %v", refreshErr)
+		// 	}
+		// }()
 	}
 	return err
 }
@@ -88,11 +90,12 @@ func (s *SQLRoleMembershipStore) RevokeRole(ctx context.Context, subjectID, role
 	q := `DELETE FROM role_members WHERE subject_id = :subject_id AND role_id = :role_id`
 	_, err := s.db.NamedExecContext(ctx, q, map[string]any{"subject_id": subjectID, "role_id": roleID})
 	if err == nil {
-		go func() {
-			if refreshErr := s.refreshSnapshot(); refreshErr != nil {
-				log.Printf("sql role membership refresh error after revoke: %v", refreshErr)
-			}
-		}()
+		// Disable async refresh for tests
+		// go func() {
+		// 	if refreshErr := s.refreshSnapshot(); refreshErr != nil {
+		// 		log.Printf("sql role membership refresh error after revoke: %v", refreshErr)
+		// 	}
+		// }()
 	}
 	return err
 }

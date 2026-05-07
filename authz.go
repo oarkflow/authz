@@ -23,6 +23,7 @@ import (
 	"log"
 
 	ristretto "github.com/dgraph-io/ristretto"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ============================================================================
@@ -660,6 +661,53 @@ type RoleMembershipStore interface {
 	AssignRole(ctx context.Context, subjectID, roleID string) error
 	RevokeRole(ctx context.Context, subjectID, roleID string) error
 	ListRoles(ctx context.Context, subjectID string) ([]string, error)
+}
+
+// UserStatus represents the lifecycle state of a user or service account.
+type UserStatus string
+
+const (
+	UserStatusActive      UserStatus = "active"
+	UserStatusSuspended   UserStatus = "suspended"
+	UserStatusDeactivated UserStatus = "deactivated"
+)
+
+// User represents an identity in the system
+type User struct {
+	ID            string         `json:"id"`
+	TenantID      string         `json:"tenant_id"`
+	Email         string         `json:"email"`
+	Name          string         `json:"name"`
+	PasswordHash  string         `json:"-"` // never serialized
+	Status        UserStatus     `json:"status"`
+	EmailVerified bool           `json:"email_verified"`
+	MFAEnabled    bool           `json:"mfa_enabled"`
+	MFASecret     string         `json:"-"` // never serialized
+	Attrs         map[string]any `json:"attrs,omitempty"`
+	LastLoginAt   time.Time      `json:"last_login_at,omitempty"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+}
+
+// UserFilter for querying users
+type UserFilter struct {
+	TenantID string
+	Email    string
+	Status   UserStatus
+	Query    string // search by name/email
+	Limit    int
+	Offset   int
+}
+
+// UserStore manages user persistence
+type UserStore interface {
+	CreateUser(ctx context.Context, user *User) error
+	UpdateUser(ctx context.Context, user *User) error
+	DeleteUser(ctx context.Context, id string) error
+	GetUser(ctx context.Context, id string) (*User, error)
+	GetUserByEmail(ctx context.Context, tenantID, email string) (*User, error)
+	ListUsers(ctx context.Context, filter UserFilter) ([]*User, error)
+	CountUsers(ctx context.Context, filter UserFilter) (int64, error)
 }
 
 // AuditEntry represents an authorization decision log
@@ -1412,6 +1460,8 @@ type Engine struct {
 	auditBatchSize     int
 	auditFlushInterval time.Duration
 	batchWorkerCount   int
+	// OpenTelemetry instrumentation (optional)
+	otel *otelInstrumentation
 }
 
 type EngineOption func(*Engine) error
@@ -1532,11 +1582,32 @@ func (e *Engine) Authorize(ctx context.Context, subject *Subject, action Action,
 // internal authorize with option to include trace (explain)
 func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action Action, resource *Resource, env *Environment, includeTrace bool) (*Decision, error) {
 	start := time.Now()
+	var cacheHit bool
+
 	decision := &Decision{
 		Allowed:   false,
 		Trace:     make([]string, 0),
 		Timestamp: start,
 	}
+
+	// Start OTel span if instrumentation is enabled
+	if e.otel != nil && e.otel.enabled && e.otel.config.EnableTracing {
+		var span trace.Span
+		ctx, span = e.otel.startSpan(ctx, "authz.authorize", subject, action, resource)
+		if span != nil {
+			defer func() {
+				e.otel.setSpanDecision(span, decision)
+				span.End()
+			}()
+		}
+	}
+
+	// Defer OTel metrics recording
+	defer func() {
+		if e.otel != nil {
+			e.otel.recordDecision(ctx, subject, action, resource, decision, time.Since(start), cacheHit)
+		}
+	}()
 
 	// Multi-tenancy enforcement
 	// default behavior: subject and resource must be in same tenant
@@ -1576,6 +1647,7 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 	ck := e.buildCacheKey(subject, action, resource, env)
 	if !includeTrace {
 		if cached, ok := e.getDecisionFromCache(ck); ok {
+			cacheHit = true
 			return cached, nil
 		}
 	}

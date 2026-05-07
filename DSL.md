@@ -50,6 +50,8 @@ policy <id> <tenant> <effect> <actions> <resources> <condition> [priority:<n>]
 policy allow-read org1 allow read document:* subject.type=user priority:10
 policy allow-admin org1 allow * * subject.roles@admin,superadmin priority:100
 policy deny-sensitive org1 deny read,write document:secret:* subject.clearance=low
+policy route-owner org1 allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
+policy route-admin org1 allow GET,POST,PUT,DELETE route:* subject.roles@admin priority:90
 ```
 
 ### role
@@ -74,6 +76,7 @@ role editor org1 Editor read:document:*,write:document:*
 role viewer org1 Viewer read:*
 role owner org1 Owner read:* owner:read,write,delete
 role lead team1 "Team Lead" *:project:* inherits:editor
+role route-admin org1 "Route Admin" GET:route:GET:/admin/*,POST:route:POST:/admin/*
 ```
 
 ### acl
@@ -96,6 +99,7 @@ acl <id> <resource> <subject> <actions> <effect> [expires:<time>]
 acl acl-1 document:123 user:alice read,write allow
 acl acl-2 document:* group:engineering read allow
 acl acl-3 document:secret:* user:bob * deny
+acl acl-route-public route:GET:/public/info guest GET allow
 acl temp-access document:123 user:charlie read allow expires:2024-12-31T23:59:59Z
 ```
 
@@ -155,6 +159,30 @@ Example: `subject.roles@admin,editor`
 - `resource.attrs.key` - Custom attributes
 - `env.time`, `env.region`
 
+## HTTP Route Permissions
+
+Route permissions use the same `policy`, `role`, and `acl` directives as other resources. The only special convention is the resource pattern.
+
+```
+route:<METHOD>:<path-pattern>
+```
+
+At request time, the HTTP middleware builds a resource with `Type: "route"` and `ID: "<METHOD>:<actual-path>"`. For a `GET /users/123` request, the checked action is usually `GET` and the resource ID is `GET:/users/123`.
+
+**Examples:**
+```
+# Owner can GET their own user profile route
+policy route-owner org1 allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
+
+# Admin role can manage admin routes
+role route-admin org1 "Route Admin" GET:route:GET:/admin/*,POST:route:POST:/admin/*
+
+# Public guest access to one route
+acl route-public route:GET:/public/info guest GET allow
+```
+
+Use `route:*` for any route, `route:GET:/admin/*` for a method-specific path pattern, and route-pattern resource extractors in framework middleware when you want to authorize framework route templates instead of concrete paths.
+
 ## Complete Example
 
 ```
@@ -168,6 +196,8 @@ policy allow-users eng allow read,write document:* subject.type=user priority:10
 policy allow-admins eng allow * * subject.roles@admin priority:100
 policy deny-sensitive eng deny * document:secret:* subject.clearance=low priority:200
 policy owner-access eng allow read,write,delete * resource.owner_id=subject.id priority:50
+policy route-owner eng allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
+policy route-admin-api eng allow GET,POST,PUT,DELETE route:* subject.roles@admin priority:90
 
 # Roles
 role admin eng Administrator *:*
@@ -175,11 +205,13 @@ role editor eng Editor read:document:*,write:document:*,delete:document:*
 role viewer eng Viewer read:*
 role owner eng Owner read:* owner:read,write,delete,share
 role team-lead backend "Team Lead" *:project:* inherits:editor
+role route-admin eng "Route Admin" GET:route:GET:/admin/*,POST:route:POST:/admin/*
 
 # ACLs
 acl temp-alice document:123 user:alice read,write allow expires:2024-12-31T23:59:59Z
 acl group-eng document:* group:engineering read allow
 acl deny-bob document:secret:* user:bob * deny
+acl route-public route:GET:/public/info guest GET allow
 
 # Memberships
 member user:alice admin
