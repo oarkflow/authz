@@ -21,10 +21,14 @@ import (
 // engine <key>=<value>...
 
 type DSLParser struct {
-	line       int
-	strict     bool
-	baseDir    string
-	includeSet map[string]bool
+	line         int
+	strict       bool
+	baseDir      string
+	includeSet   map[string]bool
+	now          time.Time
+	partsScratch []string
+	lastCondText string
+	lastCondExpr Expr
 }
 
 func NewDSLParser() *DSLParser {
@@ -316,24 +320,19 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 
 func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	cfg := &Config{
-		Version:              1,
-		Tenants:              make([]TenantConfig, 0, 8),
-		Policies:             make([]*Policy, 0, 16),
-		Roles:                make([]*Role, 0, 8),
-		ACLs:                 make([]*ACL, 0, 8),
-		Memberships:          make([]RoleMembership, 0, 8),
-		Users:                make([]*User, 0, 8),
-		Groups:               make([]*Group, 0, 8),
-		Scopes:               make([]*Scope, 0, 8),
-		ServiceAccounts:      make([]*ServiceAccount, 0, 4),
-		Invitations:          make([]*Invitation, 0, 4),
-		APIKeys:              make([]*APIKey, 0, 4),
-		PermissionBoundaries: make([]*PermissionBoundary, 0, 4),
-		Hierarchy:            make(map[string]string, 8),
-		Engine:               EngineConfig{DecisionCacheTTL: 1000, AuditBatchSize: 64},
+		Version:     1,
+		Tenants:     make([]TenantConfig, 0, 8),
+		Policies:    make([]*Policy, 0, 16),
+		Roles:       make([]*Role, 0, 8),
+		ACLs:        make([]*ACL, 0, 8),
+		Memberships: make([]RoleMembership, 0, 8),
+		Engine:      EngineConfig{DecisionCacheTTL: 1000, AuditBatchSize: 64},
 	}
 
 	p.line = 0
+	p.now = time.Now()
+	p.lastCondText = ""
+	p.lastCondExpr = nil
 	start := 0
 	for i := 0; i <= len(data); i++ {
 		if i == len(data) || data[i] == '\n' {
@@ -352,7 +351,7 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 				continue
 			}
 
-			parts, err := splitLineBytes(line)
+			parts, err := p.splitLineBytes(line)
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", p.line, err)
 			}
@@ -426,8 +425,8 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	return cfg, nil
 }
 
-func splitLineBytes(line []byte) ([]string, error) {
-	parts := make([]string, 0, 8)
+func (p *DSLParser) splitLineBytes(line []byte) ([]string, error) {
+	parts := p.partsScratch[:0]
 	var start int
 	var quoteChar byte
 	i := 0
@@ -463,7 +462,13 @@ func splitLineBytes(line []byte) ([]string, error) {
 		parts = append(parts, string(line[start:]))
 	}
 
+	p.partsScratch = parts
 	return parts, nil
+}
+
+func splitLineBytes(line []byte) ([]string, error) {
+	parser := &DSLParser{}
+	return parser.splitLineBytes(line)
 }
 
 func parseQuotedString(s string) string {
@@ -521,8 +526,13 @@ func mergeConfig(dst, src *Config) {
 	dst.Invitations = append(dst.Invitations, src.Invitations...)
 	dst.APIKeys = append(dst.APIKeys, src.APIKeys...)
 	dst.PermissionBoundaries = append(dst.PermissionBoundaries, src.PermissionBoundaries...)
-	for child, parent := range src.Hierarchy {
-		dst.Hierarchy[child] = parent
+	if len(src.Hierarchy) > 0 {
+		if dst.Hierarchy == nil {
+			dst.Hierarchy = make(map[string]string, len(src.Hierarchy))
+		}
+		for child, parent := range src.Hierarchy {
+			dst.Hierarchy[child] = parent
+		}
 	}
 }
 
@@ -534,6 +544,9 @@ func (p *DSLParser) parseTenant(cfg *Config, parts []string) error {
 	for _, opt := range parts[2:] {
 		if strings.HasPrefix(opt, "parent:") {
 			t.Parent = parseQuotedString(opt[7:])
+			if cfg.Hierarchy == nil {
+				cfg.Hierarchy = make(map[string]string, 4)
+			}
 			cfg.Hierarchy[t.ID] = t.Parent
 		} else if p.strict {
 			return fmt.Errorf("unknown tenant option: %s", opt)
@@ -560,7 +573,7 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid policy resources: %w", err)
 	}
-	condition, err := parseConditionStrict(parseQuotedString(parts[5]), p.strict)
+	condition, err := p.parseCondition(parseQuotedString(parts[5]))
 	if err != nil {
 		return fmt.Errorf("invalid policy condition: %w", err)
 	}
@@ -574,8 +587,8 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 		Condition: condition,
 		Priority:  0,
 		Enabled:   true,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: p.now,
+		UpdatedAt: p.now,
 	}
 
 	for _, opt := range parts[6:] {
@@ -614,7 +627,7 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 		Permissions:         perms,
 		OwnerAllowedActions: []Action{},
 		Inherits:            []string{},
-		CreatedAt:           time.Now(),
+		CreatedAt:           p.now,
 	}
 
 	for _, opt := range parts[4:] {
@@ -661,7 +674,7 @@ func (p *DSLParser) parseACL(cfg *Config, parts []string) error {
 		SubjectID:  parseQuotedString(parts[2]),
 		Actions:    actions,
 		Effect:     effect,
-		CreatedAt:  time.Now(),
+		CreatedAt:  p.now,
 	}
 
 	for _, opt := range parts[5:] {
@@ -956,16 +969,25 @@ func parseStringListStrict(s string, strict bool) ([]string, error) {
 		}
 		return nil, nil
 	}
-	items := strings.Split(s, ",")
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		if item == "" {
-			if strict {
-				return nil, fmt.Errorf("empty item in %q", s)
-			}
-			continue
+	count := 1
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			count++
 		}
-		out = append(out, item)
+	}
+	out := make([]string, 0, count)
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			if i > start {
+				out = append(out, s[start:i])
+			} else {
+				if strict {
+					return nil, fmt.Errorf("empty item in %q", s)
+				}
+			}
+			start = i + 1
+		}
 	}
 	return out, nil
 }
@@ -1324,6 +1346,20 @@ func (p *conditionParser) readField() string {
 		p.pos++
 	}
 	return strings.TrimSpace(p.input[start:p.pos])
+}
+
+func (p *DSLParser) parseCondition(s string) (Expr, error) {
+	// Expr values are immutable during evaluation; adjacent repeated conditions can share one parsed tree.
+	if s == p.lastCondText && p.lastCondExpr != nil {
+		return p.lastCondExpr, nil
+	}
+	expr, err := parseConditionStrict(s, p.strict)
+	if err != nil {
+		return nil, err
+	}
+	p.lastCondText = s
+	p.lastCondExpr = expr
+	return expr, nil
 }
 
 func parseScalar(s string) any {
