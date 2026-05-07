@@ -1,6 +1,7 @@
 package authz_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -337,6 +338,64 @@ func BenchmarkConfigFormatDecodeLarge(b *testing.B) {
 			}
 		}
 	})
+}
+
+func BenchmarkConfigSignatureVerify(b *testing.B) {
+	pub, priv, err := authz.GenerateConfigSigningKey()
+	if err != nil {
+		b.Fatal(err)
+	}
+	data := generateBenchmarkDSL(100, 50)
+	sig, err := authz.SignConfig(data, priv)
+	if err != nil {
+		b.Fatal(err)
+	}
+	signed := authz.AppendConfigSignature(data, sig)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := authz.VerifyConfigSignature(signed, pub); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkConfigSignatureVerifyWithKey(b *testing.B) {
+	pub, priv, err := authz.GenerateConfigSigningKey()
+	if err != nil {
+		b.Fatal(err)
+	}
+	pubBytes, err := base64.StdEncoding.DecodeString(pub)
+	if err != nil {
+		b.Fatal(err)
+	}
+	data := generateBenchmarkDSL(100, 50)
+	sig, err := authz.SignConfig(data, priv)
+	if err != nil {
+		b.Fatal(err)
+	}
+	signed := authz.AppendConfigSignature(data, sig)
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := authz.VerifyConfigSignatureWithKey(signed, pubBytes); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkValidateConfigLarge(b *testing.B) {
+	cfg, err := authz.NewDSLParser().Parse(generateBenchmarkDSL(100, 50))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := authz.ValidateConfig(cfg); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func BenchmarkBinaryEncodeLarge(b *testing.B) {

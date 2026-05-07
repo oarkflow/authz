@@ -29,6 +29,8 @@ Strict parsing rejects:
 
 Use `NewPermissiveDSLParser()` or `NewDSLParser().SetStrict(false)` only for legacy compatibility with old best-effort parsing.
 
+The default parser uses zero-copy token strings for low allocation loading. Treat the input `[]byte` passed to `Parse` as immutable after parsing. Use `ParseCopy(data)` when parsing from a mutable/reused buffer, or `NewDSLParser().SetZeroCopy(false)` when every token must be copied independently.
+
 Use `include` to split large configurations:
 
 ```authz

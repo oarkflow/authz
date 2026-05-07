@@ -44,6 +44,8 @@ acl route-public route:GET:/public/info guest GET allow
 
 Use `authz.NewPermissiveDSLParser()` or `authz.NewDSLParser().SetStrict(false)` only for legacy compatibility.
 
+`authz.NewDSLParser()` uses zero-copy token strings by default. Treat the input byte slice passed to `Parse` as immutable after parsing. Use `ParseCopy(data)` for mutable buffers, or `SetZeroCopy(false)` to copy each token.
+
 Supported conditions include simple predicates, boolean logic, comparisons, and advanced helpers:
 
 ```authz

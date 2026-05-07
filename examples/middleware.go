@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/authz"
 )
 
@@ -14,15 +14,15 @@ import (
 type FiberAuthOptions struct {
 	Engine *authz.Engine
 	// Subject extracts the subject ID from the request (required)
-	Subject func(c *fiber.Ctx) string
+	Subject func(c fiber.Ctx) string
 	// Tenant extracts the tenant ID from the request (required)
-	Tenant func(c *fiber.Ctx) string
+	Tenant func(c fiber.Ctx) string
 	// Resource extracts a fully-populated Resource from the request (required)
-	Resource func(c *fiber.Ctx) *authz.Resource
+	Resource func(c fiber.Ctx) *authz.Resource
 	// OnDenied allows customizing the response when authorization fails
-	OnDenied func(c *fiber.Ctx, decision *authz.Decision) error
+	OnDenied func(c fiber.Ctx, decision *authz.Decision) error
 	// OnError allows customizing error handling
-	OnError func(c *fiber.Ctx, err error) error
+	OnError func(c fiber.Ctx, err error) error
 }
 
 // DefaultFiberAuthOptions returns a default options struct.
@@ -30,10 +30,10 @@ func DefaultFiberAuthOptions() *FiberAuthOptions {
 	return &FiberAuthOptions{
 		Subject: nil, // caller must provide
 		Tenant:  nil, // caller must provide
-		OnDenied: func(c *fiber.Ctx, decision *authz.Decision) error {
+		OnDenied: func(c fiber.Ctx, decision *authz.Decision) error {
 			return c.Status(http.StatusForbidden).SendString("forbidden")
 		},
-		OnError: func(c *fiber.Ctx, err error) error {
+		OnError: func(c fiber.Ctx, err error) error {
 			return c.Status(http.StatusInternalServerError).SendString("internal error")
 		},
 	}
@@ -45,7 +45,7 @@ func NewFiberAuthMiddleware(opts *FiberAuthOptions) fiber.Handler {
 	if opts == nil {
 		opts = DefaultFiberAuthOptions()
 	}
-	return func(c *fiber.Ctx) error {
+	return func(c fiber.Ctx) error {
 		if opts.Engine == nil {
 			return c.Next()
 		}

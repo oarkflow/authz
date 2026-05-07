@@ -1,15 +1,17 @@
 package authz
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
-	"strings"
 )
 
 const ConfigSignaturePrefix = "# authz-signature:ed25519:"
+
+var configSignaturePrefixBytes = []byte(ConfigSignaturePrefix)
 
 func GenerateConfigSigningKey() (publicKey, privateKey string, err error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -40,15 +42,26 @@ func VerifyConfigSignature(data []byte, publicKeyB64 string) error {
 	if len(pubBytes) != ed25519.PublicKeySize {
 		return fmt.Errorf("invalid ed25519 public key size")
 	}
-	signature, ok := ExtractConfigSignature(data)
+	return VerifyConfigSignatureWithKey(data, ed25519.PublicKey(pubBytes))
+}
+
+func VerifyConfigSignatureWithKey(data []byte, publicKey ed25519.PublicKey) error {
+	if len(publicKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid ed25519 public key size")
+	}
+	signature, ok := extractConfigSignatureBytes(data)
 	if !ok {
 		return fmt.Errorf("config signature not found")
 	}
-	sigBytes, err := base64.StdEncoding.DecodeString(signature)
+	var sig [ed25519.SignatureSize]byte
+	n, err := base64.StdEncoding.Decode(sig[:], signature)
 	if err != nil {
 		return err
 	}
-	if !ed25519.Verify(ed25519.PublicKey(pubBytes), canonicalConfigBytes(data), sigBytes) {
+	if n != ed25519.SignatureSize {
+		return fmt.Errorf("invalid ed25519 signature size")
+	}
+	if !ed25519.Verify(publicKey, canonicalConfigBytes(data), sig[:]) {
 		return fmt.Errorf("config signature verification failed")
 	}
 	return nil
@@ -63,36 +76,79 @@ func SignConfigFile(filename, privateKeyB64 string) (string, error) {
 }
 
 func ExtractConfigSignature(data []byte) (string, bool) {
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, ConfigSignaturePrefix) {
-			return strings.TrimSpace(strings.TrimPrefix(line, ConfigSignaturePrefix)), true
-		}
+	signature, ok := extractConfigSignatureBytes(data)
+	if !ok {
+		return "", false
 	}
-	return "", false
+	return string(signature), true
+}
+
+func extractConfigSignatureBytes(data []byte) ([]byte, bool) {
+	for start := 0; start <= len(data); {
+		end := start
+		for end < len(data) && data[end] != '\n' {
+			end++
+		}
+		line := bytes.TrimSpace(data[start:end])
+		if bytes.HasPrefix(line, configSignaturePrefixBytes) {
+			return bytes.TrimSpace(line[len(configSignaturePrefixBytes):]), true
+		}
+		if end == len(data) {
+			break
+		}
+		start = end + 1
+	}
+	return nil, false
 }
 
 func AppendConfigSignature(data []byte, signature string) []byte {
 	canonical := stripConfigSignature(data)
+	out := make([]byte, 0, len(canonical)+1+len(ConfigSignaturePrefix)+len(signature)+1)
+	out = append(out, canonical...)
 	if len(canonical) > 0 && canonical[len(canonical)-1] != '\n' {
-		canonical = append(canonical, '\n')
+		out = append(out, '\n')
 	}
-	canonical = append(canonical, []byte(ConfigSignaturePrefix+signature+"\n")...)
-	return canonical
+	out = append(out, ConfigSignaturePrefix...)
+	out = append(out, signature...)
+	out = append(out, '\n')
+	return out
 }
 
 func canonicalConfigBytes(data []byte) []byte {
-	return []byte(strings.TrimRight(string(stripConfigSignature(data)), "\n"))
+	return bytes.TrimRight(stripConfigSignature(data), "\n")
 }
 
 func stripConfigSignature(data []byte) []byte {
-	lines := strings.Split(string(data), "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), ConfigSignaturePrefix) {
-			continue
+	var out []byte
+	last := 0
+	for start := 0; start <= len(data); {
+		end := start
+		for end < len(data) && data[end] != '\n' {
+			end++
 		}
-		out = append(out, line)
+		lineEnd := end
+		endWithNewline := end
+		if endWithNewline < len(data) {
+			endWithNewline++
+		}
+		line := bytes.TrimSpace(data[start:lineEnd])
+		if bytes.HasPrefix(line, configSignaturePrefixBytes) {
+			if out == nil {
+				if endWithNewline == len(data) {
+					return data[:start]
+				}
+				out = make([]byte, 0, len(data)-(endWithNewline-start))
+			}
+			out = append(out, data[last:start]...)
+			last = endWithNewline
+		}
+		if end == len(data) {
+			break
+		}
+		start = end + 1
 	}
-	return []byte(strings.Join(out, "\n"))
+	if out == nil {
+		return data
+	}
+	return append(out, data[last:]...)
 }

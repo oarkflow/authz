@@ -1,6 +1,7 @@
 package authz_test
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,7 +28,8 @@ func TestDSLIncludesAndCycleDetection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "main.authz"), []byte(`tenant org "Org"
-include "roles.authz"`), 0644); err != nil {
+include "roles.authz"
+policy p org allow read document:* true`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := authz.NewDSLParser().ParseFile(filepath.Join(dir, "main.authz"))
@@ -36,6 +38,9 @@ include "roles.authz"`), 0644); err != nil {
 	}
 	if len(cfg.Roles) != 1 {
 		t.Fatalf("expected included role, got %d", len(cfg.Roles))
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("expected parser to resume after include, got %d policies", len(cfg.Policies))
 	}
 
 	if err := os.WriteFile(filepath.Join(dir, "a.authz"), []byte(`include "b.authz"`), 0644); err != nil {
@@ -49,8 +54,46 @@ include "roles.authz"`), 0644); err != nil {
 	}
 }
 
+func TestDSLParseCopyIsolatedFromInputMutation(t *testing.T) {
+	data := []byte(`tenant org "Org"
+policy p org allow read document:* true
+role viewer org Viewer read:*
+member user:alice viewer`)
+	cfg, err := authz.NewDSLParser().ParseCopy(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range data {
+		data[i] = 'x'
+	}
+	if cfg.Tenants[0].ID != "org" || cfg.Policies[0].ID != "p" || cfg.Roles[0].ID != "viewer" || cfg.Memberships[0].SubjectID != "user:alice" {
+		t.Fatalf("ParseCopy config changed after input mutation: %#v", cfg)
+	}
+	if err := authz.ValidateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExampleConfigParsesAndValidates(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("examples", "config.authz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := authz.NewDSLParser().ParseCopy(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authz.ValidateConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(authz.LintConfig(cfg)) == 0 {
+		t.Fatal("expected example config to produce risk warnings")
+	}
+}
+
 func TestDSLFirstClassIAMDirectives(t *testing.T) {
 	dsl := `tenant org "Org"
+role admin org Admin *:*
 user user:alice org alice@example.com "Alice" status:active
 group eng org Engineering
 scope docs.read org read:documents
@@ -85,6 +128,13 @@ func TestConfigSigning(t *testing.T) {
 	}
 	signed := authz.AppendConfigSignature(data, sig)
 	if err := authz.VerifyConfigSignature(signed, pub); err != nil {
+		t.Fatal(err)
+	}
+	pubBytes, err := base64.StdEncoding.DecodeString(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authz.VerifyConfigSignatureWithKey(signed, pubBytes); err != nil {
 		t.Fatal(err)
 	}
 	tampered := append([]byte("tenant other \"Other\"\n"), signed[len(data):]...)

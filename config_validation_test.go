@@ -45,6 +45,45 @@ func TestValidateConfigRejectsSemanticErrors(t *testing.T) {
 				cfg.Hierarchy["child"] = "org"
 			}),
 		},
+		{
+			name: "missing service account role",
+			cfg: validConfig(func(cfg *authz.Config) {
+				cfg.ServiceAccounts = []*authz.ServiceAccount{{ID: "svc:bot", TenantID: "org", Name: "Bot", Roles: []string{"missing"}}}
+			}),
+		},
+		{
+			name: "missing service account scope",
+			cfg: validConfig(func(cfg *authz.Config) {
+				cfg.ServiceAccounts = []*authz.ServiceAccount{{ID: "svc:bot", TenantID: "org", Name: "Bot", Scopes: []string{"missing.scope"}}}
+			}),
+		},
+		{
+			name: "missing invitation role",
+			cfg: validConfig(func(cfg *authz.Config) {
+				cfg.Invitations = []*authz.Invitation{{ID: "invite1", TenantID: "org", Email: "a@example.com", RoleIDs: []string{"missing"}}}
+			}),
+		},
+		{
+			name: "missing invitation group",
+			cfg: validConfig(func(cfg *authz.Config) {
+				cfg.Invitations = []*authz.Invitation{{ID: "invite1", TenantID: "org", Email: "a@example.com", RoleIDs: []string{"admin"}, GroupIDs: []string{"missing"}}}
+			}),
+		},
+		{
+			name: "missing api key scope",
+			cfg: validConfig(func(cfg *authz.Config) {
+				cfg.APIKeys = []*authz.APIKey{{ID: "key1", TenantID: "org", UserID: "user:alice", Prefix: "sk_", Scopes: []string{"missing.scope"}}}
+			}),
+		},
+		{
+			name: "duplicate boundary",
+			cfg: validConfig(func(cfg *authz.Config) {
+				cfg.PermissionBoundaries = []*authz.PermissionBoundary{
+					{ID: "b1", TenantID: "org", Name: "One", MaxActions: []authz.Action{"read"}, MaxResources: []string{"document:*"}},
+					{ID: "b1", TenantID: "org", Name: "Two", MaxActions: []authz.Action{"read"}, MaxResources: []string{"document:*"}},
+				}
+			}),
+		},
 	}
 
 	for _, tt := range tests {

@@ -194,6 +194,8 @@ The parser supports quoted strings, comments, comma-separated actions/resources,
 
 `NewDSLParser()` is strict by default. It rejects malformed conditions, invalid effects, unknown options, invalid numbers/timestamps, malformed lists, malformed permissions, and unterminated quotes with line-numbered errors. Legacy best-effort parsing is still available through `NewPermissiveDSLParser()` or `NewDSLParser().SetStrict(false)`.
 
+For performance, `Parse(data)` uses zero-copy token strings. Treat `data` as immutable after parsing. Use `ParseCopy(data)` for mutable buffers, or `NewDSLParser().SetZeroCopy(false)` to copy tokens.
+
 Validate and plan configuration changes before applying them:
 
 ```bash

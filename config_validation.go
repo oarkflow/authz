@@ -218,99 +218,192 @@ func validateConfigDiagnostics(cfg *Config) []ConfigDiagnostic {
 			errors = append(errors, diag("error", "missing_"+entityType+"_tenant", entityType+" references a missing tenant", entityType, id))
 		}
 	}
-	seenUsers := make(map[string]bool)
-	for _, u := range cfg.Users {
-		if u == nil {
-			continue
-		}
-		if seenUsers[u.ID] {
-			errors = append(errors, diag("error", "duplicate_user_id", "duplicate user ID", "user", u.ID))
-		}
-		seenUsers[u.ID] = true
-		validateTenantScoped("user", u.ID, u.TenantID)
-	}
-	seenGroups := make(map[string]bool)
-	for _, g := range cfg.Groups {
-		if g == nil {
-			continue
-		}
-		if seenGroups[g.ID] {
-			errors = append(errors, diag("error", "duplicate_group_id", "duplicate group ID", "group", g.ID))
-		}
-		seenGroups[g.ID] = true
-		validateTenantScoped("group", g.ID, g.TenantID)
-	}
-	for _, g := range cfg.Groups {
-		if g != nil && g.ParentID != "" && !seenGroups[g.ParentID] {
-			errors = append(errors, diag("error", "missing_parent_group", "group references a missing parent group", "group", g.ID))
+	if len(cfg.Users) > 0 {
+		seenUsers := make(map[string]bool, len(cfg.Users))
+		for _, u := range cfg.Users {
+			if u == nil {
+				continue
+			}
+			if seenUsers[u.ID] {
+				errors = append(errors, diag("error", "duplicate_user_id", "duplicate user ID", "user", u.ID))
+			}
+			seenUsers[u.ID] = true
+			validateTenantScoped("user", u.ID, u.TenantID)
 		}
 	}
-	seenScopes := make(map[string]bool)
-	for _, s := range cfg.Scopes {
-		if s == nil {
-			continue
+	var groupIDs map[string]bool
+	if len(cfg.Groups) > 0 {
+		groupIDs = make(map[string]bool, len(cfg.Groups))
+		for _, g := range cfg.Groups {
+			if g == nil {
+				continue
+			}
+			if groupIDs[g.ID] {
+				errors = append(errors, diag("error", "duplicate_group_id", "duplicate group ID", "group", g.ID))
+			}
+			groupIDs[g.ID] = true
+			validateTenantScoped("group", g.ID, g.TenantID)
 		}
-		if seenScopes[s.ID] {
-			errors = append(errors, diag("error", "duplicate_scope_id", "duplicate scope ID", "scope", s.ID))
+		for _, g := range cfg.Groups {
+			if g != nil && g.ParentID != "" && !groupIDs[g.ParentID] {
+				errors = append(errors, diag("error", "missing_parent_group", "group references a missing parent group", "group", g.ID))
+			}
 		}
-		seenScopes[s.ID] = true
-		validateTenantScoped("scope", s.ID, s.TenantID)
 	}
-	for _, s := range cfg.Scopes {
-		if s != nil && s.ParentID != "" && !seenScopes[s.ParentID] {
-			errors = append(errors, diag("error", "missing_parent_scope", "scope references a missing parent scope", "scope", s.ID))
+	var scopeIDs map[string]bool
+	if len(cfg.Scopes) > 0 {
+		scopeIDs = make(map[string]bool, len(cfg.Scopes))
+		for _, s := range cfg.Scopes {
+			if s == nil {
+				continue
+			}
+			if scopeIDs[s.ID] {
+				errors = append(errors, diag("error", "duplicate_scope_id", "duplicate scope ID", "scope", s.ID))
+			}
+			scopeIDs[s.ID] = true
+			validateTenantScoped("scope", s.ID, s.TenantID)
+		}
+		for _, s := range cfg.Scopes {
+			if s != nil && s.ParentID != "" && !scopeIDs[s.ParentID] {
+				errors = append(errors, diag("error", "missing_parent_scope", "scope references a missing parent scope", "scope", s.ID))
+			}
 		}
 	}
-	seenBoundaries := make(map[string]bool)
-	for _, b := range cfg.PermissionBoundaries {
-		if b == nil {
-			continue
+	if len(cfg.PermissionBoundaries) > 0 {
+		seenBoundaries := make(map[string]bool, len(cfg.PermissionBoundaries))
+		for _, b := range cfg.PermissionBoundaries {
+			if b == nil {
+				continue
+			}
+			if seenBoundaries[b.ID] {
+				errors = append(errors, diag("error", "duplicate_boundary_id", "duplicate permission boundary ID", "boundary", b.ID))
+			}
+			seenBoundaries[b.ID] = true
+			validateTenantScoped("boundary", b.ID, b.TenantID)
+			if len(b.MaxActions) == 0 || len(b.MaxResources) == 0 {
+				errors = append(errors, diag("error", "empty_boundary_limits", "permission boundary requires actions and resources", "boundary", b.ID))
+			}
 		}
-		if seenBoundaries[b.ID] {
-			errors = append(errors, diag("error", "duplicate_boundary_id", "duplicate permission boundary ID", "boundary", b.ID))
+	}
+	if len(cfg.ServiceAccounts) > 0 {
+		seenServiceAccounts := make(map[string]bool, len(cfg.ServiceAccounts))
+		for _, sa := range cfg.ServiceAccounts {
+			if sa == nil {
+				continue
+			}
+			if seenServiceAccounts[sa.ID] {
+				errors = append(errors, diag("error", "duplicate_service_account_id", "duplicate service account ID", "service_account", sa.ID))
+			}
+			seenServiceAccounts[sa.ID] = true
+			validateTenantScoped("service_account", sa.ID, sa.TenantID)
+			for _, roleID := range sa.Roles {
+				if !roles[roleID] {
+					errors = append(errors, diag("error", "missing_service_account_role", fmt.Sprintf("service account references missing role %q", roleID), "service_account", sa.ID))
+				}
+			}
+			for _, scopeID := range sa.Scopes {
+				if !scopeIDs[scopeID] {
+					errors = append(errors, diag("error", "missing_service_account_scope", fmt.Sprintf("service account references missing scope %q", scopeID), "service_account", sa.ID))
+				}
+			}
 		}
-		seenBoundaries[b.ID] = true
-		validateTenantScoped("boundary", b.ID, b.TenantID)
-		if len(b.MaxActions) == 0 || len(b.MaxResources) == 0 {
-			errors = append(errors, diag("error", "empty_boundary_limits", "permission boundary requires actions and resources", "boundary", b.ID))
+	}
+	if len(cfg.Invitations) > 0 {
+		seenInvitations := make(map[string]bool, len(cfg.Invitations))
+		for _, inv := range cfg.Invitations {
+			if inv == nil {
+				continue
+			}
+			if seenInvitations[inv.ID] {
+				errors = append(errors, diag("error", "duplicate_invitation_id", "duplicate invitation ID", "invitation", inv.ID))
+			}
+			seenInvitations[inv.ID] = true
+			validateTenantScoped("invitation", inv.ID, inv.TenantID)
+			if inv.Email == "" {
+				errors = append(errors, diag("error", "missing_invitation_email", "invitation email is required", "invitation", inv.ID))
+			}
+			for _, roleID := range inv.RoleIDs {
+				if !roles[roleID] {
+					errors = append(errors, diag("error", "missing_invitation_role", fmt.Sprintf("invitation references missing role %q", roleID), "invitation", inv.ID))
+				}
+			}
+			for _, groupID := range inv.GroupIDs {
+				if !groupIDs[groupID] {
+					errors = append(errors, diag("error", "missing_invitation_group", fmt.Sprintf("invitation references missing group %q", groupID), "invitation", inv.ID))
+				}
+			}
+		}
+	}
+	if len(cfg.APIKeys) > 0 {
+		seenAPIKeys := make(map[string]bool, len(cfg.APIKeys))
+		for _, key := range cfg.APIKeys {
+			if key == nil {
+				continue
+			}
+			if seenAPIKeys[key.ID] {
+				errors = append(errors, diag("error", "duplicate_api_key_id", "duplicate API key ID", "api_key", key.ID))
+			}
+			seenAPIKeys[key.ID] = true
+			validateTenantScoped("api_key", key.ID, key.TenantID)
+			if key.UserID == "" {
+				errors = append(errors, diag("error", "missing_api_key_user", "API key user is required", "api_key", key.ID))
+			}
+			if key.Prefix == "" {
+				errors = append(errors, diag("error", "missing_api_key_prefix", "API key prefix is required", "api_key", key.ID))
+			}
+			for _, scopeID := range key.Scopes {
+				if !scopeIDs[scopeID] {
+					errors = append(errors, diag("error", "missing_api_key_scope", fmt.Sprintf("API key references missing scope %q", scopeID), "api_key", key.ID))
+				}
+			}
 		}
 	}
 
-	hierarchy := make(map[string]string, len(cfg.Hierarchy)+len(cfg.Tenants))
-	for child, parent := range cfg.Hierarchy {
-		hierarchy[child] = parent
-	}
-	for _, tenant := range cfg.Tenants {
-		if tenant.Parent != "" {
-			hierarchy[tenant.ID] = tenant.Parent
+	hasHierarchy := len(cfg.Hierarchy) > 0
+	if !hasHierarchy {
+		for _, tenant := range cfg.Tenants {
+			if tenant.Parent != "" {
+				hasHierarchy = true
+				break
+			}
 		}
 	}
-	for child, parent := range hierarchy {
-		if child == "" || parent == "" {
-			continue
+	if hasHierarchy {
+		hierarchy := make(map[string]string, len(cfg.Hierarchy)+len(cfg.Tenants))
+		for child, parent := range cfg.Hierarchy {
+			hierarchy[child] = parent
 		}
-		if !tenants[child] {
-			errors = append(errors, diag("error", "missing_hierarchy_child", "tenant hierarchy references a missing child tenant", "tenant", child))
+		for _, tenant := range cfg.Tenants {
+			if tenant.Parent != "" {
+				hierarchy[tenant.ID] = tenant.Parent
+			}
 		}
-		if !tenants[parent] {
-			errors = append(errors, diag("error", "missing_hierarchy_parent", "tenant hierarchy references a missing parent tenant", "tenant", child))
-		}
-		if hasTenantCycle(child, hierarchy) {
-			errors = append(errors, diag("error", "tenant_hierarchy_cycle", "tenant hierarchy contains a cycle", "tenant", child))
+		maxDepth := len(hierarchy)
+		for child, parent := range hierarchy {
+			if child == "" || parent == "" {
+				continue
+			}
+			if !tenants[child] {
+				errors = append(errors, diag("error", "missing_hierarchy_child", "tenant hierarchy references a missing child tenant", "tenant", child))
+			}
+			if !tenants[parent] {
+				errors = append(errors, diag("error", "missing_hierarchy_parent", "tenant hierarchy references a missing parent tenant", "tenant", child))
+			}
+			if hasTenantCycle(child, hierarchy, maxDepth) {
+				errors = append(errors, diag("error", "tenant_hierarchy_cycle", "tenant hierarchy contains a cycle", "tenant", child))
+			}
 		}
 	}
 
 	return errors
 }
 
-func hasTenantCycle(start string, hierarchy map[string]string) bool {
-	seen := make(map[string]bool)
+func hasTenantCycle(start string, hierarchy map[string]string, maxDepth int) bool {
 	cur := start
-	for cur != "" {
-		if seen[cur] {
+	for depth := 0; cur != ""; depth++ {
+		if depth > maxDepth {
 			return true
 		}
-		seen[cur] = true
 		cur = hierarchy[cur]
 	}
 	return false

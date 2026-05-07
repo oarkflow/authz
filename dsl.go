@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 )
 
 // DSL Syntax:
@@ -23,25 +24,52 @@ import (
 type DSLParser struct {
 	line         int
 	strict       bool
+	zeroCopy     bool
 	baseDir      string
 	includeSet   map[string]bool
 	now          time.Time
 	partsScratch []string
 	lastCondText string
 	lastCondExpr Expr
+	policyValues []Policy
+	roleValues   []Role
+	aclValues    []ACL
+	actionValues []Action
+	stringValues []string
+	permValues   []Permission
+	policyIndex  int
+	roleIndex    int
+	aclIndex     int
+	actionIndex  int
+	stringIndex  int
+	permIndex    int
 }
 
 func NewDSLParser() *DSLParser {
-	return &DSLParser{strict: true}
+	return &DSLParser{strict: true, zeroCopy: true}
 }
 
 func NewPermissiveDSLParser() *DSLParser {
-	return &DSLParser{strict: false}
+	return &DSLParser{strict: false, zeroCopy: true}
 }
 
 func (p *DSLParser) SetStrict(strict bool) *DSLParser {
 	p.strict = strict
 	return p
+}
+
+func (p *DSLParser) SetZeroCopy(zeroCopy bool) *DSLParser {
+	p.zeroCopy = zeroCopy
+	return p
+}
+
+func (p *DSLParser) ParseCopy(data []byte) (*Config, error) {
+	copied := append([]byte(nil), data...)
+	oldZeroCopy := p.zeroCopy
+	p.zeroCopy = true
+	cfg, err := p.Parse(copied)
+	p.zeroCopy = oldZeroCopy
+	return cfg, err
 }
 
 func (p *DSLParser) ParseFile(filename string) (*Config, error) {
@@ -62,12 +90,77 @@ func (p *DSLParser) parseFile(filename string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	oldBase := p.baseDir
+	oldState := p.saveState()
 	p.baseDir = filepath.Dir(filename)
 	cfg, err := p.Parse(data)
-	p.baseDir = oldBase
+	p.restoreState(oldState)
 	delete(p.includeSet, filename)
 	return cfg, err
+}
+
+type dslParserState struct {
+	line         int
+	baseDir      string
+	now          time.Time
+	partsScratch []string
+	lastCondText string
+	lastCondExpr Expr
+	policyValues []Policy
+	roleValues   []Role
+	aclValues    []ACL
+	actionValues []Action
+	stringValues []string
+	permValues   []Permission
+	policyIndex  int
+	roleIndex    int
+	aclIndex     int
+	actionIndex  int
+	stringIndex  int
+	permIndex    int
+}
+
+func (p *DSLParser) saveState() dslParserState {
+	return dslParserState{
+		line:         p.line,
+		baseDir:      p.baseDir,
+		now:          p.now,
+		partsScratch: p.partsScratch,
+		lastCondText: p.lastCondText,
+		lastCondExpr: p.lastCondExpr,
+		policyValues: p.policyValues,
+		roleValues:   p.roleValues,
+		aclValues:    p.aclValues,
+		actionValues: p.actionValues,
+		stringValues: p.stringValues,
+		permValues:   p.permValues,
+		policyIndex:  p.policyIndex,
+		roleIndex:    p.roleIndex,
+		aclIndex:     p.aclIndex,
+		actionIndex:  p.actionIndex,
+		stringIndex:  p.stringIndex,
+		permIndex:    p.permIndex,
+	}
+}
+
+func (p *DSLParser) restoreState(s dslParserState) {
+	p.line = s.line
+	p.baseDir = s.baseDir
+	p.now = s.now
+	p.partsScratch = s.partsScratch
+	p.lastCondText = s.lastCondText
+	p.lastCondExpr = s.lastCondExpr
+	p.policyValues = s.policyValues
+	p.roleValues = s.roleValues
+	p.aclValues = s.aclValues
+	p.actionValues = s.actionValues
+	p.stringValues = s.stringValues
+	p.permValues = s.permValues
+	p.policyIndex = s.policyIndex
+	p.roleIndex = s.roleIndex
+	p.aclIndex = s.aclIndex
+	p.actionIndex = s.actionIndex
+	p.stringIndex = s.stringIndex
+	p.permIndex = s.permIndex
 }
 
 type DSLEncoder struct {
@@ -319,13 +412,14 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 }
 
 func (p *DSLParser) Parse(data []byte) (*Config, error) {
+	counts := countDSLDirectives(data)
 	cfg := &Config{
 		Version:     1,
-		Tenants:     make([]TenantConfig, 0, 8),
-		Policies:    make([]*Policy, 0, 16),
-		Roles:       make([]*Role, 0, 8),
-		ACLs:        make([]*ACL, 0, 8),
-		Memberships: make([]RoleMembership, 0, 8),
+		Tenants:     make([]TenantConfig, 0, counts.tenants),
+		Policies:    make([]*Policy, 0, counts.policies),
+		Roles:       make([]*Role, 0, counts.roles),
+		ACLs:        make([]*ACL, 0, counts.acls),
+		Memberships: make([]RoleMembership, 0, counts.members),
 		Engine:      EngineConfig{DecisionCacheTTL: 1000, AuditBatchSize: 64},
 	}
 
@@ -333,6 +427,18 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	p.now = time.Now()
 	p.lastCondText = ""
 	p.lastCondExpr = nil
+	p.policyValues = make([]Policy, counts.policies)
+	p.roleValues = make([]Role, counts.roles)
+	p.aclValues = make([]ACL, counts.acls)
+	p.actionValues = make([]Action, counts.actionItems)
+	p.stringValues = make([]string, counts.stringItems)
+	p.permValues = make([]Permission, counts.permissionItems)
+	p.policyIndex = 0
+	p.roleIndex = 0
+	p.aclIndex = 0
+	p.actionIndex = 0
+	p.stringIndex = 0
+	p.permIndex = 0
 	start := 0
 	for i := 0; i <= len(data); i++ {
 		if i == len(data) || data[i] == '\n' {
@@ -425,6 +531,107 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	return cfg, nil
 }
 
+type dslDirectiveCounts struct {
+	tenants, policies, roles, acls, members   int
+	actionItems, stringItems, permissionItems int
+}
+
+func countDSLDirectives(data []byte) dslDirectiveCounts {
+	var counts dslDirectiveCounts
+	start := 0
+	for i := 0; i <= len(data); i++ {
+		if i != len(data) && data[i] != '\n' {
+			continue
+		}
+		line := data[start:i]
+		start = i + 1
+		for len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+			line = line[1:]
+		}
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+		switch {
+		case bytes.HasPrefix(line, []byte("tenant ")):
+			counts.tenants++
+		case bytes.HasPrefix(line, []byte("policy ")):
+			counts.policies++
+			counts.actionItems += countTokenListItems(line, 4)
+			counts.stringItems += countTokenListItems(line, 5)
+		case bytes.HasPrefix(line, []byte("role ")):
+			counts.roles++
+			counts.permissionItems += countTokenListItems(line, 4)
+		case bytes.HasPrefix(line, []byte("acl ")):
+			counts.acls++
+			counts.actionItems += countTokenListItems(line, 4)
+		case bytes.HasPrefix(line, []byte("member ")):
+			counts.members++
+		}
+	}
+	return counts
+}
+
+func countTokenListItems(line []byte, tokenIndex int) int {
+	token := tokenAt(line, tokenIndex)
+	if len(token) == 0 {
+		return 0
+	}
+	count := 1
+	for _, ch := range token {
+		if ch == ',' {
+			count++
+		}
+	}
+	return count
+}
+
+func countListItems(s string) int {
+	if s == "" {
+		return 0
+	}
+	count := 1
+	for i := 0; i < len(s); i++ {
+		if s[i] == ',' {
+			count++
+		}
+	}
+	return count
+}
+
+func tokenAt(line []byte, tokenIndex int) []byte {
+	var start int
+	var quoteChar byte
+	index := 0
+	for i := 0; i <= len(line); i++ {
+		if i == len(line) || ((line[i] == ' ' || line[i] == '\t') && quoteChar == 0) {
+			if i > start {
+				token := line[start:i]
+				if len(token) >= 2 {
+					first, last := token[0], token[len(token)-1]
+					if (first == '"' && last == '"') || (first == '\'' && last == '\'') || (first == '`' && last == '`') {
+						token = token[1 : len(token)-1]
+					}
+				}
+				if index == tokenIndex {
+					return token
+				}
+				index++
+			}
+			start = i + 1
+			continue
+		}
+		if i < len(line) {
+			ch := line[i]
+			if (ch == '"' || ch == '\'' || ch == '`') && quoteChar == 0 && (i == start || line[i-1] == ' ' || line[i-1] == '\t') {
+				quoteChar = ch
+			} else if ch == quoteChar {
+				quoteChar = 0
+			}
+		}
+	}
+	return nil
+}
+
 func (p *DSLParser) splitLineBytes(line []byte) ([]string, error) {
 	parts := p.partsScratch[:0]
 	var start int
@@ -435,7 +642,7 @@ func (p *DSLParser) splitLineBytes(line []byte) ([]string, error) {
 		ch := line[i]
 		if ch == '#' && quoteChar == 0 {
 			if i > start {
-				parts = append(parts, string(line[start:i]))
+				parts = append(parts, p.tokenString(line[start:i]))
 			}
 			return parts, nil
 		}
@@ -443,12 +650,12 @@ func (p *DSLParser) splitLineBytes(line []byte) ([]string, error) {
 			quoteChar = ch
 			start = i + 1
 		} else if ch == quoteChar {
-			parts = append(parts, string(line[start:i]))
+			parts = append(parts, p.tokenString(line[start:i]))
 			start = i + 1
 			quoteChar = 0
 		} else if (ch == ' ' || ch == '\t') && quoteChar == 0 {
 			if i > start {
-				parts = append(parts, string(line[start:i]))
+				parts = append(parts, p.tokenString(line[start:i]))
 			}
 			start = i + 1
 		}
@@ -459,7 +666,7 @@ func (p *DSLParser) splitLineBytes(line []byte) ([]string, error) {
 		return nil, fmt.Errorf("unterminated quote")
 	}
 	if start < len(line) {
-		parts = append(parts, string(line[start:]))
+		parts = append(parts, p.tokenString(line[start:]))
 	}
 
 	p.partsScratch = parts
@@ -480,6 +687,84 @@ func parseQuotedString(s string) string {
 		}
 	}
 	return s
+}
+
+func (p *DSLParser) tokenString(b []byte) string {
+	if !p.zeroCopy {
+		return string(b)
+	}
+	return bytesToString(b)
+}
+
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	// Zero-copy token strings keep parser allocations low; callers should treat Parse input as immutable.
+	return unsafe.String(&b[0], len(b))
+}
+
+func (p *DSLParser) nextPolicy() *Policy {
+	if p.policyIndex < len(p.policyValues) {
+		pol := &p.policyValues[p.policyIndex]
+		p.policyIndex++
+		return pol
+	}
+	return &Policy{}
+}
+
+func (p *DSLParser) nextRole() *Role {
+	if p.roleIndex < len(p.roleValues) {
+		role := &p.roleValues[p.roleIndex]
+		p.roleIndex++
+		return role
+	}
+	return &Role{}
+}
+
+func (p *DSLParser) nextACL() *ACL {
+	if p.aclIndex < len(p.aclValues) {
+		acl := &p.aclValues[p.aclIndex]
+		p.aclIndex++
+		return acl
+	}
+	return &ACL{}
+}
+
+func (p *DSLParser) nextActionSlice(n int) []Action {
+	if n <= 0 {
+		return nil
+	}
+	if p.actionIndex+n <= len(p.actionValues) {
+		start := p.actionIndex
+		p.actionIndex += n
+		return p.actionValues[start:start]
+	}
+	return make([]Action, 0, n)
+}
+
+func (p *DSLParser) nextStringSlice(n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	if p.stringIndex+n <= len(p.stringValues) {
+		start := p.stringIndex
+		p.stringIndex += n
+		return p.stringValues[start:start]
+	}
+	return make([]string, 0, n)
+}
+
+func (p *DSLParser) nextPermissionSlice(n int) []Permission {
+	if n <= 0 {
+		return nil
+	}
+	if p.permIndex+n <= len(p.permValues) {
+		start := p.permIndex
+		p.permIndex += n
+		return p.permValues[start:start]
+	}
+	return make([]Permission, 0, n)
 }
 
 func (p *DSLParser) parseInclude(cfg *Config, parts []string) error {
@@ -565,11 +850,11 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 	if p.strict && !validEffect(effect) {
 		return fmt.Errorf("invalid policy effect: %s", effect)
 	}
-	actions, err := parseListStrict(parseQuotedString(parts[3]), p.strict)
+	actions, err := p.parseList(parseQuotedString(parts[3]))
 	if err != nil {
 		return fmt.Errorf("invalid policy actions: %w", err)
 	}
-	resources, err := parseStringListStrict(parseQuotedString(parts[4]), p.strict)
+	resources, err := p.parseStringList(parseQuotedString(parts[4]))
 	if err != nil {
 		return fmt.Errorf("invalid policy resources: %w", err)
 	}
@@ -578,7 +863,8 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 		return fmt.Errorf("invalid policy condition: %w", err)
 	}
 
-	pol := &Policy{
+	pol := p.nextPolicy()
+	*pol = Policy{
 		ID:        parseQuotedString(parts[0]),
 		TenantID:  parseQuotedString(parts[1]),
 		Effect:    effect,
@@ -615,12 +901,13 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 		return fmt.Errorf("role requires: <id> <tenant> <name> <perms> [inherits:<roles>] [owner:<actions>]")
 	}
 
-	perms, err := parsePermissionsStrict(parseQuotedString(parts[3]), p.strict)
+	perms, err := p.parsePermissions(parseQuotedString(parts[3]))
 	if err != nil {
 		return fmt.Errorf("invalid role permissions: %w", err)
 	}
 
-	role := &Role{
+	role := p.nextRole()
+	*role = Role{
 		ID:                  parseQuotedString(parts[0]),
 		TenantID:            parseQuotedString(parts[1]),
 		Name:                parseQuotedString(parts[2]),
@@ -632,13 +919,13 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 
 	for _, opt := range parts[4:] {
 		if strings.HasPrefix(opt, "inherits:") {
-			inherits, err := parseStringListStrict(parseQuotedString(opt[9:]), p.strict)
+			inherits, err := p.parseStringList(parseQuotedString(opt[9:]))
 			if err != nil {
 				return fmt.Errorf("invalid inherits option: %w", err)
 			}
 			role.Inherits = inherits
 		} else if strings.HasPrefix(opt, "owner:") {
-			actions, err := parseListStrict(parseQuotedString(opt[6:]), p.strict)
+			actions, err := p.parseList(parseQuotedString(opt[6:]))
 			if err != nil {
 				return fmt.Errorf("invalid owner option: %w", err)
 			}
@@ -663,12 +950,13 @@ func (p *DSLParser) parseACL(cfg *Config, parts []string) error {
 	if p.strict && !validEffect(effect) {
 		return fmt.Errorf("invalid acl effect: %s", effect)
 	}
-	actions, err := parseListStrict(parseQuotedString(parts[3]), p.strict)
+	actions, err := p.parseList(parseQuotedString(parts[3]))
 	if err != nil {
 		return fmt.Errorf("invalid acl actions: %w", err)
 	}
 
-	acl := &ACL{
+	acl := p.nextACL()
+	*acl = ACL{
 		ID:         parseQuotedString(parts[0]),
 		ResourceID: parseQuotedString(parts[1]),
 		SubjectID:  parseQuotedString(parts[2]),
@@ -809,13 +1097,13 @@ func (p *DSLParser) parseServiceAccount(cfg *Config, parts []string) error {
 		case strings.HasPrefix(opt, "client:"):
 			sa.ClientID = parseQuotedString(opt[7:])
 		case strings.HasPrefix(opt, "roles:"):
-			v, err := parseStringListStrict(parseQuotedString(opt[6:]), p.strict)
+			v, err := p.parseStringList(parseQuotedString(opt[6:]))
 			if err != nil {
 				return fmt.Errorf("invalid roles option: %w", err)
 			}
 			sa.Roles = v
 		case strings.HasPrefix(opt, "scopes:"):
-			v, err := parseStringListStrict(parseQuotedString(opt[7:]), p.strict)
+			v, err := p.parseStringList(parseQuotedString(opt[7:]))
 			if err != nil {
 				return fmt.Errorf("invalid scopes option: %w", err)
 			}
@@ -836,7 +1124,7 @@ func (p *DSLParser) parseInvitation(cfg *Config, parts []string) error {
 	if len(parts) < 4 {
 		return fmt.Errorf("invitation requires: <id> <tenant> <email> <roles> [groups:<groups>] [status:<status>] [invited_by:<user>] [expires:<time>]")
 	}
-	roles, err := parseStringListStrict(parseQuotedString(parts[3]), p.strict)
+	roles, err := p.parseStringList(parseQuotedString(parts[3]))
 	if err != nil {
 		return fmt.Errorf("invalid invitation roles: %w", err)
 	}
@@ -844,7 +1132,7 @@ func (p *DSLParser) parseInvitation(cfg *Config, parts []string) error {
 	for _, opt := range parts[4:] {
 		switch {
 		case strings.HasPrefix(opt, "groups:"):
-			v, err := parseStringListStrict(parseQuotedString(opt[7:]), p.strict)
+			v, err := p.parseStringList(parseQuotedString(opt[7:]))
 			if err != nil {
 				return fmt.Errorf("invalid groups option: %w", err)
 			}
@@ -880,7 +1168,7 @@ func (p *DSLParser) parseAPIKey(cfg *Config, parts []string) error {
 	for _, opt := range parts[5:] {
 		switch {
 		case strings.HasPrefix(opt, "scopes:"):
-			v, err := parseStringListStrict(parseQuotedString(opt[7:]), p.strict)
+			v, err := p.parseStringList(parseQuotedString(opt[7:]))
 			if err != nil {
 				return fmt.Errorf("invalid scopes option: %w", err)
 			}
@@ -908,11 +1196,11 @@ func (p *DSLParser) parseBoundary(cfg *Config, parts []string) error {
 	if len(parts) < 5 {
 		return fmt.Errorf("boundary requires: <id> <tenant> <name> <actions> <resources>")
 	}
-	actions, err := parseListStrict(parseQuotedString(parts[3]), p.strict)
+	actions, err := p.parseList(parseQuotedString(parts[3]))
 	if err != nil {
 		return fmt.Errorf("invalid boundary actions: %w", err)
 	}
-	resources, err := parseStringListStrict(parseQuotedString(parts[4]), p.strict)
+	resources, err := p.parseStringList(parseQuotedString(parts[4]))
 	if err != nil {
 		return fmt.Errorf("invalid boundary resources: %w", err)
 	}
@@ -926,6 +1214,35 @@ func (p *DSLParser) parseBoundary(cfg *Config, parts []string) error {
 func parseList(s string) []Action {
 	actions, _ := parseListStrict(s, false)
 	return actions
+}
+
+func (p *DSLParser) parseList(s string) ([]Action, error) {
+	if s == "" {
+		if p.strict {
+			return nil, fmt.Errorf("empty list")
+		}
+		return nil, nil
+	}
+	count := countListItems(s)
+	actions := p.nextActionSlice(count)
+	if s == "*" {
+		return append(actions, Action("*")), nil
+	}
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			if i > start {
+				actions = append(actions, Action(s[start:i]))
+			} else if p.strict {
+				return nil, fmt.Errorf("empty item in %q", s)
+			}
+			start = i + 1
+		}
+	}
+	if p.strict && len(actions) == 0 {
+		return nil, fmt.Errorf("empty list")
+	}
+	return actions, nil
 }
 
 func parseListStrict(s string, strict bool) ([]Action, error) {
@@ -962,6 +1279,28 @@ func parseListStrict(s string, strict bool) ([]Action, error) {
 	return actions, nil
 }
 
+func (p *DSLParser) parseStringList(s string) ([]string, error) {
+	if s == "" {
+		if p.strict {
+			return nil, fmt.Errorf("empty list")
+		}
+		return nil, nil
+	}
+	out := p.nextStringSlice(countListItems(s))
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			if i > start {
+				out = append(out, s[start:i])
+			} else if p.strict {
+				return nil, fmt.Errorf("empty item in %q", s)
+			}
+			start = i + 1
+		}
+	}
+	return out, nil
+}
+
 func parseStringListStrict(s string, strict bool) ([]string, error) {
 	if s == "" {
 		if strict {
@@ -995,6 +1334,45 @@ func parseStringListStrict(s string, strict bool) ([]string, error) {
 func parsePermissions(s string) []Permission {
 	perms, _ := parsePermissionsStrict(s, false)
 	return perms
+}
+
+func (p *DSLParser) parsePermissions(s string) ([]Permission, error) {
+	if s == "" {
+		if p.strict {
+			return nil, fmt.Errorf("empty permissions")
+		}
+		return nil, nil
+	}
+	perms := p.nextPermissionSlice(countListItems(s))
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			if i > start {
+				part := s[start:i]
+				found := false
+				for j := 0; j < len(part); j++ {
+					if part[j] == ':' {
+						if p.strict && (j == 0 || j == len(part)-1) {
+							return nil, fmt.Errorf("malformed permission %q", part)
+						}
+						perms = append(perms, Permission{Action: Action(part[:j]), Resource: part[j+1:]})
+						found = true
+						break
+					}
+				}
+				if p.strict && !found {
+					return nil, fmt.Errorf("malformed permission %q", part)
+				}
+			} else if p.strict {
+				return nil, fmt.Errorf("empty permission in %q", s)
+			}
+			start = i + 1
+		}
+	}
+	if p.strict && len(perms) == 0 {
+		return nil, fmt.Errorf("empty permissions")
+	}
+	return perms, nil
 }
 
 func parsePermissionsStrict(s string, strict bool) ([]Permission, error) {

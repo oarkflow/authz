@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/authz"
 	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/stores"
@@ -69,9 +69,9 @@ func main() {
 	_ = rmStore.AssignRole(ctx, "mgr", "role-manager")
 
 	// Define simple extractor functions for this example (app-level code owns these rules)
-	subjectFn := func(c *fiber.Ctx) string { return c.Get("X-Subject-ID") }
-	tenantFn := func(c *fiber.Ctx) string { return c.Get("X-Tenant-ID") }
-	resourceFn := func(c *fiber.Ctx) *authz.Resource {
+	subjectFn := func(c fiber.Ctx) string { return c.Get("X-Subject-ID") }
+	tenantFn := func(c fiber.Ctx) string { return c.Get("X-Tenant-ID") }
+	resourceFn := func(c fiber.Ctx) *authz.Resource {
 		res := &authz.Resource{Type: "route", ID: c.Method() + ":" + c.Path(), TenantID: tenantFn(c)}
 		// Try route param "id" as owner; if not available, fallback to last path segment
 		if id := c.Params("id"); id != "" {
@@ -95,21 +95,21 @@ func main() {
 		Subject:  subjectFn,
 		Tenant:   tenantFn,
 		Resource: resourceFn,
-		OnDenied: func(c *fiber.Ctx, decision *authz.Decision) error {
+		OnDenied: func(c fiber.Ctx, decision *authz.Decision) error {
 			return c.Status(http.StatusForbidden).SendString("custom forbidden")
 		},
 	}
 	app.Use(NewFiberAuthMiddleware(opts))
 
-	app.Get("/admin/dashboard", func(c *fiber.Ctx) error {
+	app.Get("/admin/dashboard", func(c fiber.Ctx) error {
 		return c.SendString("admin dashboard")
 	})
 
-	app.Get("/users/:id", func(c *fiber.Ctx) error {
+	app.Get("/users/:id", func(c fiber.Ctx) error {
 		return c.SendString(fmt.Sprintf("user %s profile", c.Params("id")))
 	})
 
-	app.Get("/public/info", func(c *fiber.Ctx) error {
+	app.Get("/public/info", func(c fiber.Ctx) error {
 		return c.SendString("public info")
 	})
 
