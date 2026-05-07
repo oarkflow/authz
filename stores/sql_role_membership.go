@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/oarkflow/authz"
 	"github.com/oarkflow/squealx"
 )
 
@@ -121,6 +122,24 @@ func (s *SQLRoleMembershipStore) ListRoles(ctx context.Context, subjectID string
 			return nil, err
 		}
 		out = append(out, role)
+	}
+	return out, nil
+}
+
+func (s *SQLRoleMembershipStore) ListRoleMemberships(ctx context.Context) ([]authz.RoleMembership, error) {
+	out := make([]authz.RoleMembership, 0)
+	q := `SELECT subject_id, role_id FROM role_members`
+	r, err := s.db.QueryxContext(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	for r.Next() {
+		var m authz.RoleMembership
+		if err := r.Scan(&m.SubjectID, &m.RoleID); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
 	}
 	return out, nil
 }

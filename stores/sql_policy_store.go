@@ -66,7 +66,7 @@ func (s *SQLPolicyStore) CreatePolicy(ctx context.Context, p *authz.Policy) erro
 	resources, _ := json.Marshal(p.Resources)
 	cond := ""
 	if p.Condition != nil {
-		cond = p.Condition.String()
+		cond = authz.FormatCondition(p.Condition)
 	}
 	q := `INSERT INTO policies(id, tenant_id, effect, actions_json, resources_json, condition_text, priority, enabled, version, created_at, updated_at) VALUES(:id, :tenant_id, :effect, :actions_json, :resources_json, :condition_text, :priority, :enabled, :version, :created_at, :updated_at)`
 	_, err := s.db.NamedExecContext(ctx, q, map[string]any{
@@ -104,7 +104,7 @@ func (s *SQLPolicyStore) UpdatePolicy(ctx context.Context, p *authz.Policy) erro
 	resources, _ := json.Marshal(p.Resources)
 	cond := ""
 	if p.Condition != nil {
-		cond = p.Condition.String()
+		cond = authz.FormatCondition(p.Condition)
 	}
 	q := `UPDATE policies SET tenant_id=:tenant_id, effect=:effect, actions_json=:actions_json, resources_json=:resources_json, condition_text=:condition_text, priority=:priority, enabled=:enabled, version=:version, updated_at=:updated_at WHERE id=:id`
 	_, err := s.db.NamedExecContext(ctx, q, map[string]any{

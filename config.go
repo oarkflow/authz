@@ -14,14 +14,21 @@ import (
 
 // Config represents the complete authz configuration
 type Config struct {
-	Version     uint16            `json:"version" yaml:"version"`
-	Tenants     []TenantConfig    `json:"tenants" yaml:"tenants"`
-	Policies    []*Policy         `json:"policies" yaml:"policies"`
-	Roles       []*Role           `json:"roles" yaml:"roles"`
-	ACLs        []*ACL            `json:"acls" yaml:"acls"`
-	Memberships []RoleMembership  `json:"memberships" yaml:"memberships"`
-	Engine      EngineConfig      `json:"engine" yaml:"engine"`
-	Hierarchy   map[string]string `json:"hierarchy" yaml:"hierarchy"` // child -> parent
+	Version              uint16                `json:"version" yaml:"version"`
+	Tenants              []TenantConfig        `json:"tenants" yaml:"tenants"`
+	Policies             []*Policy             `json:"policies" yaml:"policies"`
+	Roles                []*Role               `json:"roles" yaml:"roles"`
+	ACLs                 []*ACL                `json:"acls" yaml:"acls"`
+	Memberships          []RoleMembership      `json:"memberships" yaml:"memberships"`
+	Users                []*User               `json:"users,omitempty" yaml:"users,omitempty"`
+	Groups               []*Group              `json:"groups,omitempty" yaml:"groups,omitempty"`
+	Scopes               []*Scope              `json:"scopes,omitempty" yaml:"scopes,omitempty"`
+	ServiceAccounts      []*ServiceAccount     `json:"service_accounts,omitempty" yaml:"service_accounts,omitempty"`
+	Invitations          []*Invitation         `json:"invitations,omitempty" yaml:"invitations,omitempty"`
+	APIKeys              []*APIKey             `json:"api_keys,omitempty" yaml:"api_keys,omitempty"`
+	PermissionBoundaries []*PermissionBoundary `json:"permission_boundaries,omitempty" yaml:"permission_boundaries,omitempty"`
+	Engine               EngineConfig          `json:"engine" yaml:"engine"`
+	Hierarchy            map[string]string     `json:"hierarchy" yaml:"hierarchy"` // child -> parent
 }
 
 type TenantConfig struct {

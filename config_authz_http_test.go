@@ -74,8 +74,7 @@ func TestConfigAuthzHTTPRouteServer(t *testing.T) {
 		},
 	})
 
-	server := httptest.NewServer(authMiddleware(mux))
-	defer server.Close()
+	handler := authMiddleware(mux)
 
 	tests := []struct {
 		name      string
@@ -116,21 +115,18 @@ func TestConfigAuthzHTTPRouteServer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req, err := http.NewRequest(tt.method, server.URL+tt.path, nil)
+			req, err := http.NewRequest(tt.method, tt.path, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			req.Header.Set("X-Subject-ID", tt.subjectID)
 			req.Header.Set("X-Tenant-ID", "org1")
 
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
 
-			if resp.StatusCode != tt.want {
-				t.Fatalf("%s %s as %s: got status %d, want %d", tt.method, tt.path, tt.subjectID, resp.StatusCode, tt.want)
+			if rec.Code != tt.want {
+				t.Fatalf("%s %s as %s: got status %d, want %d", tt.method, tt.path, tt.subjectID, rec.Code, tt.want)
 			}
 		})
 	}

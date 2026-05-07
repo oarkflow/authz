@@ -98,6 +98,73 @@ member user:erin route-admin
 	}
 }
 
+func TestDSLStrictParserRejectsInvalidInput(t *testing.T) {
+	tests := []struct {
+		name string
+		dsl  string
+	}{
+		{"invalid condition", `tenant org "Org"
+policy p org allow read document:* subject.type~user`},
+		{"invalid effect", `tenant org "Org"
+policy p org maybe read document:* true`},
+		{"invalid priority", `tenant org "Org"
+policy p org allow read document:* true priority:nope`},
+		{"invalid expires", `tenant org "Org"
+acl a document:1 user:alice read allow expires:nope`},
+		{"unknown option", `tenant org "Org"
+role r org Role read:* unknown:value`},
+		{"malformed list", `tenant org "Org"
+policy p org allow read, document:* true`},
+		{"malformed permission", `tenant org "Org"
+role r org Role read`},
+		{"unterminated quote", `tenant org "Org`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := authz.NewDSLParser().Parse([]byte(tt.dsl))
+			if err == nil {
+				t.Fatal("expected strict parser error")
+			}
+			if got := err.Error(); got == "" || got[:4] != "line" {
+				t.Fatalf("expected line-numbered error, got %q", got)
+			}
+		})
+	}
+}
+
+func TestDSLInlineComments(t *testing.T) {
+	dsl := `
+tenant org "Org # quoted" # outside comment
+policy p org allow read document:* true # outside comment
+`
+	cfg, err := authz.NewDSLParser().Parse([]byte(dsl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Tenants[0].Name != "Org # quoted" {
+		t.Fatalf("quoted comment marker was not preserved: %q", cfg.Tenants[0].Name)
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("expected policy to parse with inline comment, got %d", len(cfg.Policies))
+	}
+}
+
+func TestDSLPermissiveParserCompatibility(t *testing.T) {
+	dsl := `tenant org "Org"
+policy p org maybe read document:* subject.type~user priority:nope`
+	cfg, err := authz.NewPermissiveDSLParser().Parse([]byte(dsl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("expected permissive parser to keep policy, got %d", len(cfg.Policies))
+	}
+	if _, ok := cfg.Policies[0].Condition.(*authz.TrueExpr); !ok {
+		t.Fatalf("expected unsupported permissive condition to fall back to true")
+	}
+}
+
 func TestBinaryProtocol(t *testing.T) {
 	cfg := &authz.Config{
 		Version: 1,

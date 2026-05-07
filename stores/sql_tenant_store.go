@@ -150,25 +150,29 @@ func (s *SQLTenantStore) ListTenants(ctx context.Context) ([]*authz.Tenant, erro
 	var tenants []*authz.Tenant
 	for rows.Next() {
 		var tenant authz.Tenant
-		var parentID, attrsJSON *string
-		var createdAt, updatedAt *time.Time
+		var parentID, attrsJSON sql.NullString
+		var createdAt, updatedAt sql.NullString
 
 		err := rows.Scan(&tenant.ID, &tenant.Name, &parentID, &attrsJSON, &createdAt, &updatedAt)
 		if err != nil {
 			return nil, err
 		}
 
-		if parentID != nil {
-			tenant.ParentID = *parentID
+		if parentID.Valid {
+			tenant.ParentID = parentID.String
 		}
-		if attrsJSON != nil && *attrsJSON != "" {
-			_ = json.Unmarshal([]byte(*attrsJSON), &tenant.Attrs)
+		if attrsJSON.Valid && attrsJSON.String != "" {
+			_ = json.Unmarshal([]byte(attrsJSON.String), &tenant.Attrs)
 		}
-		if createdAt != nil {
-			tenant.CreatedAt = *createdAt
+		if createdAt.Valid {
+			if t, err := parseFlexibleTime(createdAt.String); err == nil {
+				tenant.CreatedAt = t
+			}
 		}
-		if updatedAt != nil {
-			tenant.UpdatedAt = *updatedAt
+		if updatedAt.Valid {
+			if t, err := parseFlexibleTime(updatedAt.String); err == nil {
+				tenant.UpdatedAt = t
+			}
 		}
 
 		tenants = append(tenants, &tenant)

@@ -9,9 +9,34 @@ A minimal, high-performance domain-specific language for authz configuration.
 ```
 
 - Lines starting with `#` are comments
+- Inline comments are supported outside quoted strings
 - Whitespace-separated arguments
 - Quoted strings for values with spaces
 - Options use `key:value` format
+
+## Production Strictness
+
+`NewDSLParser()` is strict by default and fails closed. It returns line-numbered errors for malformed syntax instead of silently accepting risky configuration.
+
+Strict parsing rejects:
+- Unterminated quotes
+- Unknown directive options
+- Invalid `allow`/`deny` effects
+- Invalid integers and RFC3339 timestamps
+- Empty list entries such as `read,`
+- Malformed role permissions without `action:resource`
+- Unsupported condition syntax
+
+Use `NewPermissiveDSLParser()` or `NewDSLParser().SetStrict(false)` only for legacy compatibility with old best-effort parsing.
+
+Use `include` to split large configurations:
+
+```authz
+include "./tenants.authz"
+include "./routes/admin.authz"
+```
+
+Includes are resolved relative to the including file when using `ParseFile` or `authz-config`, and cycles are rejected.
 
 ## Directives
 
@@ -136,6 +161,20 @@ engine <key>=<value>...
 engine cache_ttl=5000 attr_ttl=10000 batch_size=128 flush_interval=50 workers=8
 ```
 
+### IAM directives
+
+The DSL can also declare IAM objects for single-source-of-truth configs. Core engine apply still handles tenants, policies, roles, ACLs, and memberships; `ApplyConfigIAM` applies IAM objects when the matching stores are supplied.
+
+```
+user <id> <tenant> <email> <name> [status:<status>]
+group <id> <tenant> <name> [parent:<group>] [desc:<text>]
+scope <id> <tenant> <name> [parent:<scope>] [desc:<text>]
+service_account <id> <tenant> <name> [client:<client_id>] [roles:<roles>] [scopes:<scopes>] [status:<status>]
+invitation <id> <tenant> <email> <roles> [groups:<groups>] [status:<status>] [invited_by:<user>] [expires:<time>]
+api_key <id> <tenant> <user> <prefix> <name> [scopes:<scopes>] [expires:<time>]
+boundary <id> <tenant> <name> <actions> <resources>
+```
+
 ## Conditions
 
 Conditions use a simple expression syntax:
@@ -152,12 +191,32 @@ field@value1,value2,value3
 ```
 Example: `subject.roles@admin,editor`
 
+### Boolean logic and advanced expressions
+
+Use quotes around conditions that contain spaces:
+
+```
+policy p org allow read document:* "(subject.roles@admin,ops || resource.owner_id=subject.id) && subject.attrs.level>=3"
+```
+
+Supported advanced forms:
+
+```
+field>=value
+regex(field,pattern)
+cidr(10.0.0.0/8)
+time_between(09:00,18:00)
+range(field,min,max)
+```
+
 ### Field References
 - `subject.id`, `subject.type`, `subject.roles`, `subject.groups`
 - `subject.attrs.key` - Custom attributes
 - `resource.id`, `resource.type`, `resource.owner_id`
 - `resource.attrs.key` - Custom attributes
 - `env.time`, `env.region`
+
+Unsupported condition text is an error in strict mode.
 
 ## HTTP Route Permissions
 
@@ -221,6 +280,36 @@ member user:dave team-lead
 
 # Engine config
 engine cache_ttl=5000 attr_ttl=10000 batch_size=128 workers=8
+```
+
+## Validation, Linting, And Apply Modes
+
+Use the CLI before shipping a DSL file:
+
+```bash
+go run ./cmd/authz-config validate examples/config.authz
+go run ./cmd/authz-config plan examples/config.authz --sync
+go run ./cmd/authz-config apply examples/config.authz --sync --dry-run
+go run ./cmd/authz-config fmt examples/config.authz
+go run ./cmd/authz-config plan examples/config.authz --sync --sqlite ./authz.db
+```
+
+`validate` performs strict parsing plus semantic validation. It rejects duplicate IDs, missing tenant references, missing inherited roles, missing membership roles, invalid effects, empty actions/resources, nil policy conditions, and tenant hierarchy cycles.
+
+`LintConfig` reports warnings that may be valid but risky, such as `*:*`, `route:*`, unused roles, tenants with no rules, and ACL subjects that do not look namespaced.
+
+Apply modes:
+- `ApplyConfig` keeps the existing additive upsert behavior.
+- `PlanConfigApply` and `ApplyConfigPlan` support dry-run planning.
+- `ApplyModeSync` reconciles policies, roles, ACLs, and tenants by deleting stale objects that are not present in the file.
+- Role memberships are exactly reconciled when the store implements `EnumerableRoleMembershipStore`; otherwise they are assigned additively with a warning.
+
+Signing:
+
+```bash
+go run ./cmd/authz-config sign-keygen
+go run ./cmd/authz-config sign config.authz <private-key> config.signed.authz
+go run ./cmd/authz-config verify config.signed.authz <public-key>
 ```
 
 ## Binary Protocol
@@ -391,6 +480,6 @@ line 5: policy requires: <id> <tenant> <effect> <actions> <resources> <condition
 line 12: unknown directive: invalid
 ```
 
-## Extensions
+## Production Extensions
 
-The DSL is designed to be minimal. For complex conditions, use the programmatic API or extend the condition parser.
+The DSL includes the production features expected for managed authorization configuration: strict parsing, semantic validation, lint diagnostics, includes, canonical formatting, dry-run/sync planning, SQLite-backed diffing, config signing, schema migration hooks, first-class IAM entity directives, route permissions, and a richer condition grammar. For domain-specific predicates beyond the built-in grammar, add a typed `Expr` implementation and expose it through the condition parser.

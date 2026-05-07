@@ -422,6 +422,18 @@ func (m *MemoryRoleMembershipStore) ListRoles(ctx context.Context, subjectID str
 	return out, nil
 }
 
+func (m *MemoryRoleMembershipStore) ListRoleMemberships(ctx context.Context) ([]authz.RoleMembership, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]authz.RoleMembership, 0)
+	for subjectID, set := range m.store {
+		for roleID := range set {
+			out = append(out, authz.RoleMembership{SubjectID: subjectID, RoleID: roleID})
+		}
+	}
+	return out, nil
+}
+
 // MemoryTenantStore implements in-memory tenant persistence
 type MemoryTenantStore struct {
 	mu      sync.RWMutex

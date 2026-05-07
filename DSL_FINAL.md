@@ -1,159 +1,114 @@
-# Custom DSL & Binary Protocol - Final Summary
+# Production-Hardened `.authz` DSL
 
-## Implementation Complete ✓
+The `.authz` DSL is now intended for production bootstrap and controlled declarative configuration workflows. The grammar remains intentionally small, but parsing and validation are fail-closed by default.
 
-A minimal, high-performance domain-specific language (DSL) and binary protocol for authz configuration with **actual benchmark results**.
+## Current Syntax
 
-## Performance Results (Measured)
-
-### Small Config (10 policies, 5 roles)
-
-| Format | Encode | Decode | Memory | Allocs |
-|--------|--------|--------|--------|--------|
-| **DSL** | **3.2µs** | **11.4µs** | **69KB** | **63** |
-| Binary | 7.0µs | 12.7µs | 7KB | 345 |
-| JSON | 41.5µs | 59.5µs | 7KB | 221 |
-| YAML | 311.4µs | N/A | 351KB | 1,149 |
-
-### Key Metrics
-- **DSL is 12.8x faster than JSON encoding**
-- **DSL is 5.2x faster than JSON decoding**
-- **DSL is 96x faster than YAML encoding**
-- **Only 63 allocations** (optimized from 97)
-
-## Files Delivered
-
-1. **dsl.go** (650 lines)
-   - DSLParser with optimized byte-level parsing
-   - DSLEncoder for Config → DSL conversion
-   - BinaryEncoder/Decoder for compact format
-   - Zero-copy optimizations
-
-2. **config_bench_test.go** (200 lines)
-   - Comprehensive benchmarks
-   - Actual performance measurements
-   - Size comparisons
-
-3. **examples/config.authz** (35 lines)
-   - Complete DSL example
-   - Production-ready template
-
-4. **examples/dsl_example.go** (300 lines)
-   - Usage demonstrations
-   - Performance comparisons
-
-5. **BENCHMARKS.md** (350 lines)
-   - Actual benchmark results
-   - Performance analysis
-   - Recommendations
-
-6. **DSL.md** (450 lines)
-   - Complete syntax reference
-   - Examples and patterns
-
-7. **DSL_QUICKSTART.md** (200 lines)
-   - 3-minute getting started
-
-**Total: ~2,385 lines of optimized code**
-
-## DSL Syntax
-
-```
+```authz
 tenant <id> <name> [parent:<parent_id>]
 policy <id> <tenant> <effect> <actions> <resources> <condition> [priority:<n>]
 role <id> <tenant> <name> <perms> [inherits:<roles>] [owner:<actions>]
 acl <id> <resource> <subject> <actions> <effect> [expires:<time>]
 member <subject> <role>
-engine cache_ttl=<ms> batch_size=<n> workers=<n>
+user <id> <tenant> <email> <name> [status:<status>]
+group <id> <tenant> <name> [parent:<group>] [desc:<text>]
+scope <id> <tenant> <name> [parent:<scope>] [desc:<text>]
+service_account <id> <tenant> <name> [client:<client_id>] [roles:<roles>] [scopes:<scopes>] [status:<status>]
+invitation <id> <tenant> <email> <roles> [groups:<groups>] [status:<status>] [invited_by:<user>] [expires:<time>]
+api_key <id> <tenant> <user> <prefix> <name> [scopes:<scopes>] [expires:<time>]
+boundary <id> <tenant> <name> <actions> <resources>
+engine cache_ttl=<ms> attr_ttl=<ms> batch_size=<n> flush_interval=<ms> workers=<n>
 ```
 
-## Optimizations Applied
+Large configs can use `include "./other.authz"`. Includes resolve relative to the including file and cycles are rejected.
 
-### DSL Parser
-1. **Zero-copy parsing**: Work with []byte directly
-2. **Pre-allocated slices**: Capacity hints (8, 16 elements)
-3. **Inline tokenization**: No strings.Split
-4. **Buffer optimization**: 64KB scanner buffer
-5. **Result**: 63 allocs, 11.4µs parse
+Route permissions use normal resources:
 
-### DSL Encoder
-1. **strings.Builder**: Single allocation
-2. **No reflection**: Direct field access
-3. **Minimal formatting**: Simple concatenation
-4. **Result**: 12 allocs, 3.2µs encode
-
-### Binary Protocol
-1. **Compact encoding**: uint8/uint16 for counts
-2. **Little-endian**: x86/ARM optimized
-3. **Section-based**: 7 section types
-4. **Result**: 7µs encode, 12.7µs decode
-
-## Usage
-
-### Parse DSL
-```go
-parser := authz.NewDSLParser()
-cfg, _ := parser.Parse(dslData)
-engine.ApplyConfig(ctx, cfg)
+```authz
+policy route-owner org1 allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
+role route-admin org1 "Route Admin" GET:route:GET:/admin/*,POST:route:POST:/admin/*
+acl route-public route:GET:/public/info guest GET allow
 ```
 
-### Encode DSL
-```go
-encoder := authz.NewDSLEncoder()
-dslData, _ := encoder.Encode(cfg)
-os.WriteFile("config.authz", dslData, 0644)
+## Strict Parsing
+
+`authz.NewDSLParser()` is strict by default. It rejects:
+
+- Unterminated quotes
+- Unknown options
+- Invalid `allow`/`deny` effects
+- Invalid integers and timestamps
+- Empty list entries
+- Malformed `action:resource` role permissions
+- Unsupported condition syntax
+
+Use `authz.NewPermissiveDSLParser()` or `authz.NewDSLParser().SetStrict(false)` only for legacy compatibility.
+
+Supported conditions include simple predicates, boolean logic, comparisons, and advanced helpers:
+
+```authz
+true
+subject.type=user
+subject.attrs.clearance!=high
+subject.roles@admin,superadmin
+(subject.roles@admin,ops || resource.owner_id=subject.id) && subject.attrs.level>=3
+regex(subject.id,^user:)
+cidr(10.0.0.0/8)
+time_between(09:00,18:00)
+range(subject.attrs.score,1,10)
 ```
 
-### Binary Protocol
-```go
-// Encode
-encoder := authz.NewBinaryEncoder()
-binary, _ := encoder.Encode(cfg)
+## Validation And Linting
 
-// Decode
-decoder := authz.NewBinaryDecoder(binary)
-cfg, _ := decoder.Decode()
-```
+`authz.ValidateConfig(cfg)` returns blocking semantic errors for duplicate IDs, missing tenant references, missing inherited roles, missing membership roles, empty policy/ACL actions or resources, invalid effects, nil policy conditions, and tenant hierarchy cycles.
 
-## Benchmark Commands
+`authz.LintConfig(cfg)` returns warnings for risky but valid configuration, including broad grants such as `*:*` and `route:*`, unused roles, tenants with no rules, and unusual ACL subjects.
+
+CLI:
 
 ```bash
-# Run all benchmarks
-go test -bench=. -benchmem -benchtime=2s -run=^$
-
-# DSL only
-go test -bench=BenchmarkDSL -benchmem -run=^$
-
-# Size comparison
-go test -run=TestSizeComparison
+go run ./cmd/authz-config validate examples/config.authz
 ```
 
-## Advantages
+## Apply Planning
 
-1. **Performance**: 3.2µs encode, 11.4µs parse
-2. **Memory**: Only 63 allocations
-3. **Simplicity**: No YAML/JSON dependencies
-4. **Readability**: Clean, purpose-built syntax
-5. **Compact**: Smaller than YAML
-6. **Type-Safe**: Built for authz domain
-7. **Binary**: Ultra-fast production format
+`ApplyConfig` remains additive/upsert-only for compatibility.
 
-## Production Deployment
+Declarative workflows should use:
 
-1. **Development**: Use DSL (3.2µs encode, readable)
-2. **CI/CD**: Validate with `authz-config validate`
-3. **Build**: Convert to binary (7µs encode)
-4. **Deploy**: Ship binary for fast loading (12.7µs decode)
-5. **Monitor**: Track parse times
+```go
+plan, err := engine.PlanConfigApply(ctx, cfg, authz.ConfigApplyOptions{
+	Mode:   authz.ApplyModeSync,
+	DryRun: true,
+})
+err = engine.ApplyConfigPlan(ctx, plan)
+```
 
-## Conclusion
+Sync mode reconciles policies, roles, ACLs, tenants, and role memberships when the store implements `EnumerableRoleMembershipStore`.
 
-The custom DSL and binary protocol provide exceptional performance:
+IAM objects are parsed into `Config` and applied through `ApplyConfigIAM` when matching stores are supplied.
 
-- **3.2µs DSL encoding** - 12.8x faster than JSON
-- **11.4µs DSL parsing** - 5.2x faster than JSON
-- **7µs binary encoding** - 44x faster than YAML
-- **63 allocations** - highly optimized
-- **Zero dependencies** - no YAML/JSON libraries
+CLI:
 
-Perfect for high-performance, large-scale authorization systems.
+```bash
+go run ./cmd/authz-config plan examples/config.authz --sync
+go run ./cmd/authz-config apply examples/config.authz --sync --dry-run
+go run ./cmd/authz-config plan examples/config.authz --sync --sqlite ./authz.db
+go run ./cmd/authz-config fmt examples/config.authz
+go run ./cmd/authz-config sign-keygen
+go run ./cmd/authz-config sign config.authz <private-key> config.signed.authz
+go run ./cmd/authz-config verify config.signed.authz <public-key>
+```
+
+## Verification
+
+Primary checks:
+
+```bash
+GOCACHE=$PWD/.gocache go test ./...
+GOCACHE=$PWD/.gocache go run ./cmd/authz-config validate examples/config.authz
+GOCACHE=$PWD/.gocache go run ./cmd/authz-config plan examples/config.authz --sync
+GOCACHE=$PWD/.gocache go run ./cmd/authz-config fmt examples/config.authz
+```
+
+The test suite covers strict parser failures, inline comments, permissive parser compatibility, includes with cycle detection, rich condition parsing, first-class IAM directives, config signing, semantic validation, lint warnings, dry-run/sync apply planning, and HTTP route permissions loaded from `examples/config.authz`.

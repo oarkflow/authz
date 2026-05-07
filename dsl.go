@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,11 +21,49 @@ import (
 // engine <key>=<value>...
 
 type DSLParser struct {
-	line int
+	line       int
+	strict     bool
+	baseDir    string
+	includeSet map[string]bool
 }
 
 func NewDSLParser() *DSLParser {
-	return &DSLParser{}
+	return &DSLParser{strict: true}
+}
+
+func NewPermissiveDSLParser() *DSLParser {
+	return &DSLParser{strict: false}
+}
+
+func (p *DSLParser) SetStrict(strict bool) *DSLParser {
+	p.strict = strict
+	return p
+}
+
+func (p *DSLParser) ParseFile(filename string) (*Config, error) {
+	abs, err := filepath.Abs(filename)
+	if err != nil {
+		return nil, err
+	}
+	p.includeSet = make(map[string]bool)
+	return p.parseFile(abs)
+}
+
+func (p *DSLParser) parseFile(filename string) (*Config, error) {
+	if p.includeSet[filename] {
+		return nil, fmt.Errorf("include cycle detected at %s", filename)
+	}
+	p.includeSet[filename] = true
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	oldBase := p.baseDir
+	p.baseDir = filepath.Dir(filename)
+	cfg, err := p.Parse(data)
+	p.baseDir = oldBase
+	delete(p.includeSet, filename)
+	return cfg, err
 }
 
 type DSLEncoder struct {
@@ -80,7 +120,7 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 		}
 		e.buf = append(e.buf, resourcesStr...)
 		e.buf = append(e.buf, `" "`...)
-		e.buf = append(e.buf, p.Condition.String()...)
+		e.buf = append(e.buf, conditionToDSL(p.Condition)...)
 		e.buf = append(e.buf, '"')
 		if p.Priority != 0 {
 			e.buf = append(e.buf, " priority:"...)
@@ -168,6 +208,74 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 		e.buf = append(e.buf, "\"\n"...)
 	}
 
+	for _, u := range cfg.Users {
+		e.buf = append(e.buf, "user \""...)
+		e.buf = append(e.buf, u.ID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, u.TenantID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, u.Email...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, u.Name...)
+		e.buf = append(e.buf, '"')
+		if u.Status != "" && u.Status != UserStatusActive {
+			e.buf = append(e.buf, " status:"...)
+			e.buf = append(e.buf, string(u.Status)...)
+		}
+		e.buf = append(e.buf, '\n')
+	}
+	for _, g := range cfg.Groups {
+		e.buf = append(e.buf, "group \""...)
+		e.buf = append(e.buf, g.ID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, g.TenantID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, g.Name...)
+		e.buf = append(e.buf, '"')
+		if g.ParentID != "" {
+			e.buf = append(e.buf, " parent:"...)
+			e.buf = append(e.buf, g.ParentID...)
+		}
+		e.buf = append(e.buf, '\n')
+	}
+	for _, s := range cfg.Scopes {
+		e.buf = append(e.buf, "scope \""...)
+		e.buf = append(e.buf, s.ID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, s.TenantID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, s.Name...)
+		e.buf = append(e.buf, '"')
+		if s.ParentID != "" {
+			e.buf = append(e.buf, " parent:"...)
+			e.buf = append(e.buf, s.ParentID...)
+		}
+		e.buf = append(e.buf, '\n')
+	}
+	for _, b := range cfg.PermissionBoundaries {
+		e.buf = append(e.buf, "boundary \""...)
+		e.buf = append(e.buf, b.ID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, b.TenantID...)
+		e.buf = append(e.buf, `" "`...)
+		e.buf = append(e.buf, b.Name...)
+		e.buf = append(e.buf, `" "`...)
+		for i, a := range b.MaxActions {
+			if i > 0 {
+				e.buf = append(e.buf, ',')
+			}
+			e.buf = append(e.buf, string(a)...)
+		}
+		e.buf = append(e.buf, `" "`...)
+		for i, r := range b.MaxResources {
+			if i > 0 {
+				e.buf = append(e.buf, ',')
+			}
+			e.buf = append(e.buf, r...)
+		}
+		e.buf = append(e.buf, "\"\n"...)
+	}
+
 	if cfg.Engine.DecisionCacheTTL > 0 || cfg.Engine.AttributeCacheTTL > 0 || cfg.Engine.AuditBatchSize > 0 || cfg.Engine.AuditFlushInterval > 0 || cfg.Engine.BatchWorkerCount > 0 {
 		e.buf = append(e.buf, "engine"...)
 		if cfg.Engine.DecisionCacheTTL > 0 {
@@ -208,14 +316,21 @@ func (e *DSLEncoder) Encode(cfg *Config) ([]byte, error) {
 
 func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	cfg := &Config{
-		Version:     1,
-		Tenants:     make([]TenantConfig, 0, 8),
-		Policies:    make([]*Policy, 0, 16),
-		Roles:       make([]*Role, 0, 8),
-		ACLs:        make([]*ACL, 0, 8),
-		Memberships: make([]RoleMembership, 0, 8),
-		Hierarchy:   make(map[string]string, 8),
-		Engine:      EngineConfig{DecisionCacheTTL: 1000, AuditBatchSize: 64},
+		Version:              1,
+		Tenants:              make([]TenantConfig, 0, 8),
+		Policies:             make([]*Policy, 0, 16),
+		Roles:                make([]*Role, 0, 8),
+		ACLs:                 make([]*ACL, 0, 8),
+		Memberships:          make([]RoleMembership, 0, 8),
+		Users:                make([]*User, 0, 8),
+		Groups:               make([]*Group, 0, 8),
+		Scopes:               make([]*Scope, 0, 8),
+		ServiceAccounts:      make([]*ServiceAccount, 0, 4),
+		Invitations:          make([]*Invitation, 0, 4),
+		APIKeys:              make([]*APIKey, 0, 4),
+		PermissionBoundaries: make([]*PermissionBoundary, 0, 4),
+		Hierarchy:            make(map[string]string, 8),
+		Engine:               EngineConfig{DecisionCacheTTL: 1000, AuditBatchSize: 64},
 	}
 
 	p.line = 0
@@ -237,12 +352,19 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 				continue
 			}
 
-			parts := splitLineBytes(line)
+			parts, err := splitLineBytes(line)
+			if err != nil {
+				return nil, fmt.Errorf("line %d: %w", p.line, err)
+			}
 			if len(parts) == 0 {
 				continue
 			}
 
 			switch parts[0] {
+			case "include":
+				if err := p.parseInclude(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
 			case "tenant":
 				if err := p.parseTenant(cfg, parts[1:]); err != nil {
 					return nil, fmt.Errorf("line %d: %w", p.line, err)
@@ -267,6 +389,34 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 				if err := p.parseEngine(cfg, parts[1:]); err != nil {
 					return nil, fmt.Errorf("line %d: %w", p.line, err)
 				}
+			case "user":
+				if err := p.parseUser(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
+			case "group":
+				if err := p.parseGroup(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
+			case "scope":
+				if err := p.parseScope(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
+			case "service_account":
+				if err := p.parseServiceAccount(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
+			case "invitation":
+				if err := p.parseInvitation(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
+			case "api_key":
+				if err := p.parseAPIKey(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
+			case "boundary":
+				if err := p.parseBoundary(cfg, parts[1:]); err != nil {
+					return nil, fmt.Errorf("line %d: %w", p.line, err)
+				}
 			default:
 				return nil, fmt.Errorf("line %d: unknown directive: %s", p.line, parts[0])
 			}
@@ -276,7 +426,7 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	return cfg, nil
 }
 
-func splitLineBytes(line []byte) []string {
+func splitLineBytes(line []byte) ([]string, error) {
 	parts := make([]string, 0, 8)
 	var start int
 	var quoteChar byte
@@ -284,6 +434,12 @@ func splitLineBytes(line []byte) []string {
 
 	for i < len(line) {
 		ch := line[i]
+		if ch == '#' && quoteChar == 0 {
+			if i > start {
+				parts = append(parts, string(line[start:i]))
+			}
+			return parts, nil
+		}
 		if (ch == '"' || ch == '\'' || ch == '`') && quoteChar == 0 && (i == start || line[i-1] == ' ' || line[i-1] == '\t') {
 			quoteChar = ch
 			start = i + 1
@@ -300,11 +456,14 @@ func splitLineBytes(line []byte) []string {
 		i++
 	}
 
+	if quoteChar != 0 {
+		return nil, fmt.Errorf("unterminated quote")
+	}
 	if start < len(line) {
 		parts = append(parts, string(line[start:]))
 	}
 
-	return parts
+	return parts, nil
 }
 
 func parseQuotedString(s string) string {
@@ -318,6 +477,55 @@ func parseQuotedString(s string) string {
 	return s
 }
 
+func (p *DSLParser) parseInclude(cfg *Config, parts []string) error {
+	if len(parts) != 1 {
+		return fmt.Errorf("include requires: <file>")
+	}
+	name := parseQuotedString(parts[0])
+	if name == "" {
+		return fmt.Errorf("include path is required")
+	}
+	base := p.baseDir
+	if base == "" {
+		base = "."
+	}
+	path := name
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(base, path)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if p.includeSet == nil {
+		p.includeSet = make(map[string]bool)
+	}
+	included, err := p.parseFile(abs)
+	if err != nil {
+		return err
+	}
+	mergeConfig(cfg, included)
+	return nil
+}
+
+func mergeConfig(dst, src *Config) {
+	dst.Tenants = append(dst.Tenants, src.Tenants...)
+	dst.Policies = append(dst.Policies, src.Policies...)
+	dst.Roles = append(dst.Roles, src.Roles...)
+	dst.ACLs = append(dst.ACLs, src.ACLs...)
+	dst.Memberships = append(dst.Memberships, src.Memberships...)
+	dst.Users = append(dst.Users, src.Users...)
+	dst.Groups = append(dst.Groups, src.Groups...)
+	dst.Scopes = append(dst.Scopes, src.Scopes...)
+	dst.ServiceAccounts = append(dst.ServiceAccounts, src.ServiceAccounts...)
+	dst.Invitations = append(dst.Invitations, src.Invitations...)
+	dst.APIKeys = append(dst.APIKeys, src.APIKeys...)
+	dst.PermissionBoundaries = append(dst.PermissionBoundaries, src.PermissionBoundaries...)
+	for child, parent := range src.Hierarchy {
+		dst.Hierarchy[child] = parent
+	}
+}
+
 func (p *DSLParser) parseTenant(cfg *Config, parts []string) error {
 	if len(parts) < 2 {
 		return fmt.Errorf("tenant requires: <id> <name> [parent:<id>]")
@@ -327,6 +535,8 @@ func (p *DSLParser) parseTenant(cfg *Config, parts []string) error {
 		if strings.HasPrefix(opt, "parent:") {
 			t.Parent = parseQuotedString(opt[7:])
 			cfg.Hierarchy[t.ID] = t.Parent
+		} else if p.strict {
+			return fmt.Errorf("unknown tenant option: %s", opt)
 		}
 	}
 	cfg.Tenants = append(cfg.Tenants, t)
@@ -338,13 +548,30 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 		return fmt.Errorf("policy requires: <id> <tenant> <effect> <actions> <resources> <condition> [priority:<n>]")
 	}
 
+	effect := Effect(parseQuotedString(parts[2]))
+	if p.strict && !validEffect(effect) {
+		return fmt.Errorf("invalid policy effect: %s", effect)
+	}
+	actions, err := parseListStrict(parseQuotedString(parts[3]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid policy actions: %w", err)
+	}
+	resources, err := parseStringListStrict(parseQuotedString(parts[4]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid policy resources: %w", err)
+	}
+	condition, err := parseConditionStrict(parseQuotedString(parts[5]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid policy condition: %w", err)
+	}
+
 	pol := &Policy{
 		ID:        parseQuotedString(parts[0]),
 		TenantID:  parseQuotedString(parts[1]),
-		Effect:    Effect(parseQuotedString(parts[2])),
-		Actions:   parseList(parseQuotedString(parts[3])),
-		Resources: strings.Split(parseQuotedString(parts[4]), ","),
-		Condition: parseCondition(parseQuotedString(parts[5])),
+		Effect:    effect,
+		Actions:   actions,
+		Resources: resources,
+		Condition: condition,
 		Priority:  0,
 		Enabled:   true,
 		CreatedAt: time.Now(),
@@ -353,7 +580,16 @@ func (p *DSLParser) parsePolicy(cfg *Config, parts []string) error {
 
 	for _, opt := range parts[6:] {
 		if strings.HasPrefix(opt, "priority:") {
-			pol.Priority, _ = strconv.Atoi(opt[9:])
+			priority, err := strconv.Atoi(parseQuotedString(opt[9:]))
+			if err != nil {
+				if p.strict {
+					return fmt.Errorf("invalid priority: %s", opt[9:])
+				}
+			} else {
+				pol.Priority = priority
+			}
+		} else if p.strict {
+			return fmt.Errorf("unknown policy option: %s", opt)
 		}
 	}
 
@@ -366,11 +602,16 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 		return fmt.Errorf("role requires: <id> <tenant> <name> <perms> [inherits:<roles>] [owner:<actions>]")
 	}
 
+	perms, err := parsePermissionsStrict(parseQuotedString(parts[3]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid role permissions: %w", err)
+	}
+
 	role := &Role{
 		ID:                  parseQuotedString(parts[0]),
 		TenantID:            parseQuotedString(parts[1]),
 		Name:                parseQuotedString(parts[2]),
-		Permissions:         parsePermissions(parseQuotedString(parts[3])),
+		Permissions:         perms,
 		OwnerAllowedActions: []Action{},
 		Inherits:            []string{},
 		CreatedAt:           time.Now(),
@@ -378,11 +619,21 @@ func (p *DSLParser) parseRole(cfg *Config, parts []string) error {
 
 	for _, opt := range parts[4:] {
 		if strings.HasPrefix(opt, "inherits:") {
-			role.Inherits = strings.Split(parseQuotedString(opt[9:]), ",")
+			inherits, err := parseStringListStrict(parseQuotedString(opt[9:]), p.strict)
+			if err != nil {
+				return fmt.Errorf("invalid inherits option: %w", err)
+			}
+			role.Inherits = inherits
 		} else if strings.HasPrefix(opt, "owner:") {
-			for _, a := range strings.Split(parseQuotedString(opt[6:]), ",") {
+			actions, err := parseListStrict(parseQuotedString(opt[6:]), p.strict)
+			if err != nil {
+				return fmt.Errorf("invalid owner option: %w", err)
+			}
+			for _, a := range actions {
 				role.OwnerAllowedActions = append(role.OwnerAllowedActions, Action(a))
 			}
+		} else if p.strict {
+			return fmt.Errorf("unknown role option: %s", opt)
 		}
 	}
 
@@ -395,18 +646,36 @@ func (p *DSLParser) parseACL(cfg *Config, parts []string) error {
 		return fmt.Errorf("acl requires: <id> <resource> <subject> <actions> <effect> [expires:<time>]")
 	}
 
+	effect := Effect(parseQuotedString(parts[4]))
+	if p.strict && !validEffect(effect) {
+		return fmt.Errorf("invalid acl effect: %s", effect)
+	}
+	actions, err := parseListStrict(parseQuotedString(parts[3]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid acl actions: %w", err)
+	}
+
 	acl := &ACL{
 		ID:         parseQuotedString(parts[0]),
 		ResourceID: parseQuotedString(parts[1]),
 		SubjectID:  parseQuotedString(parts[2]),
-		Actions:    parseList(parseQuotedString(parts[3])),
-		Effect:     Effect(parseQuotedString(parts[4])),
+		Actions:    actions,
+		Effect:     effect,
 		CreatedAt:  time.Now(),
 	}
 
 	for _, opt := range parts[5:] {
 		if strings.HasPrefix(opt, "expires:") {
-			acl.ExpiresAt, _ = time.Parse(time.RFC3339, opt[8:])
+			expires, err := time.Parse(time.RFC3339, parseQuotedString(opt[8:]))
+			if err != nil {
+				if p.strict {
+					return fmt.Errorf("invalid expires timestamp: %s", opt[8:])
+				}
+			} else {
+				acl.ExpiresAt = expires
+			}
+		} else if p.strict {
+			return fmt.Errorf("unknown acl option: %s", opt)
 		}
 	}
 
@@ -429,31 +698,232 @@ func (p *DSLParser) parseEngine(cfg *Config, parts []string) error {
 	for _, kv := range parts {
 		idx := strings.Index(kv, "=")
 		if idx == -1 {
+			if p.strict {
+				return fmt.Errorf("invalid engine option: %s", kv)
+			}
 			continue
 		}
 		key, val := kv[:idx], parseQuotedString(kv[idx+1:])
+		var err error
 		switch key {
 		case "cache_ttl":
-			cfg.Engine.DecisionCacheTTL, _ = strconv.ParseInt(val, 10, 64)
+			cfg.Engine.DecisionCacheTTL, err = strconv.ParseInt(val, 10, 64)
 		case "attr_ttl":
-			cfg.Engine.AttributeCacheTTL, _ = strconv.ParseInt(val, 10, 64)
+			cfg.Engine.AttributeCacheTTL, err = strconv.ParseInt(val, 10, 64)
 		case "batch_size":
-			cfg.Engine.AuditBatchSize, _ = strconv.Atoi(val)
+			cfg.Engine.AuditBatchSize, err = strconv.Atoi(val)
 		case "flush_interval":
-			cfg.Engine.AuditFlushInterval, _ = strconv.ParseInt(val, 10, 64)
+			cfg.Engine.AuditFlushInterval, err = strconv.ParseInt(val, 10, 64)
 		case "workers":
-			cfg.Engine.BatchWorkerCount, _ = strconv.Atoi(val)
+			cfg.Engine.BatchWorkerCount, err = strconv.Atoi(val)
+		default:
+			if p.strict {
+				return fmt.Errorf("unknown engine option: %s", key)
+			}
+		}
+		if err != nil && p.strict {
+			return fmt.Errorf("invalid engine value for %s: %s", key, val)
 		}
 	}
 	return nil
 }
 
+func (p *DSLParser) parseUser(cfg *Config, parts []string) error {
+	if len(parts) < 4 {
+		return fmt.Errorf("user requires: <id> <tenant> <email> <name> [status:<status>]")
+	}
+	u := &User{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), Email: parseQuotedString(parts[2]), Name: parseQuotedString(parts[3]), Status: UserStatusActive}
+	for _, opt := range parts[4:] {
+		if strings.HasPrefix(opt, "status:") {
+			u.Status = UserStatus(parseQuotedString(opt[7:]))
+		} else if p.strict {
+			return fmt.Errorf("unknown user option: %s", opt)
+		}
+	}
+	cfg.Users = append(cfg.Users, u)
+	return nil
+}
+
+func (p *DSLParser) parseGroup(cfg *Config, parts []string) error {
+	if len(parts) < 3 {
+		return fmt.Errorf("group requires: <id> <tenant> <name> [parent:<group>] [desc:<text>]")
+	}
+	g := &Group{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), Name: parseQuotedString(parts[2])}
+	for _, opt := range parts[3:] {
+		switch {
+		case strings.HasPrefix(opt, "parent:"):
+			g.ParentID = parseQuotedString(opt[7:])
+		case strings.HasPrefix(opt, "desc:"):
+			g.Description = parseQuotedString(opt[5:])
+		default:
+			if p.strict {
+				return fmt.Errorf("unknown group option: %s", opt)
+			}
+		}
+	}
+	cfg.Groups = append(cfg.Groups, g)
+	return nil
+}
+
+func (p *DSLParser) parseScope(cfg *Config, parts []string) error {
+	if len(parts) < 3 {
+		return fmt.Errorf("scope requires: <id> <tenant> <name> [parent:<scope>] [desc:<text>]")
+	}
+	s := &Scope{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), Name: parseQuotedString(parts[2])}
+	for _, opt := range parts[3:] {
+		switch {
+		case strings.HasPrefix(opt, "parent:"):
+			s.ParentID = parseQuotedString(opt[7:])
+		case strings.HasPrefix(opt, "desc:"):
+			s.Description = parseQuotedString(opt[5:])
+		default:
+			if p.strict {
+				return fmt.Errorf("unknown scope option: %s", opt)
+			}
+		}
+	}
+	cfg.Scopes = append(cfg.Scopes, s)
+	return nil
+}
+
+func (p *DSLParser) parseServiceAccount(cfg *Config, parts []string) error {
+	if len(parts) < 3 {
+		return fmt.Errorf("service_account requires: <id> <tenant> <name> [client:<id>] [roles:<roles>] [scopes:<scopes>] [status:<status>]")
+	}
+	sa := &ServiceAccount{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), Name: parseQuotedString(parts[2]), Status: UserStatusActive}
+	for _, opt := range parts[3:] {
+		switch {
+		case strings.HasPrefix(opt, "client:"):
+			sa.ClientID = parseQuotedString(opt[7:])
+		case strings.HasPrefix(opt, "roles:"):
+			v, err := parseStringListStrict(parseQuotedString(opt[6:]), p.strict)
+			if err != nil {
+				return fmt.Errorf("invalid roles option: %w", err)
+			}
+			sa.Roles = v
+		case strings.HasPrefix(opt, "scopes:"):
+			v, err := parseStringListStrict(parseQuotedString(opt[7:]), p.strict)
+			if err != nil {
+				return fmt.Errorf("invalid scopes option: %w", err)
+			}
+			sa.Scopes = v
+		case strings.HasPrefix(opt, "status:"):
+			sa.Status = UserStatus(parseQuotedString(opt[7:]))
+		default:
+			if p.strict {
+				return fmt.Errorf("unknown service_account option: %s", opt)
+			}
+		}
+	}
+	cfg.ServiceAccounts = append(cfg.ServiceAccounts, sa)
+	return nil
+}
+
+func (p *DSLParser) parseInvitation(cfg *Config, parts []string) error {
+	if len(parts) < 4 {
+		return fmt.Errorf("invitation requires: <id> <tenant> <email> <roles> [groups:<groups>] [status:<status>] [invited_by:<user>] [expires:<time>]")
+	}
+	roles, err := parseStringListStrict(parseQuotedString(parts[3]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid invitation roles: %w", err)
+	}
+	inv := &Invitation{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), Email: parseQuotedString(parts[2]), RoleIDs: roles, Status: InviteStatusPending}
+	for _, opt := range parts[4:] {
+		switch {
+		case strings.HasPrefix(opt, "groups:"):
+			v, err := parseStringListStrict(parseQuotedString(opt[7:]), p.strict)
+			if err != nil {
+				return fmt.Errorf("invalid groups option: %w", err)
+			}
+			inv.GroupIDs = v
+		case strings.HasPrefix(opt, "status:"):
+			inv.Status = InviteStatus(parseQuotedString(opt[7:]))
+		case strings.HasPrefix(opt, "invited_by:"):
+			inv.InvitedBy = parseQuotedString(opt[11:])
+		case strings.HasPrefix(opt, "expires:"):
+			t, err := time.Parse(time.RFC3339, parseQuotedString(opt[8:]))
+			if err != nil {
+				if p.strict {
+					return fmt.Errorf("invalid expires timestamp: %s", opt[8:])
+				}
+			} else {
+				inv.ExpiresAt = t
+			}
+		default:
+			if p.strict {
+				return fmt.Errorf("unknown invitation option: %s", opt)
+			}
+		}
+	}
+	cfg.Invitations = append(cfg.Invitations, inv)
+	return nil
+}
+
+func (p *DSLParser) parseAPIKey(cfg *Config, parts []string) error {
+	if len(parts) < 5 {
+		return fmt.Errorf("api_key requires: <id> <tenant> <user> <prefix> <name> [scopes:<scopes>] [expires:<time>]")
+	}
+	key := &APIKey{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), UserID: parseQuotedString(parts[2]), Prefix: parseQuotedString(parts[3]), Name: parseQuotedString(parts[4])}
+	for _, opt := range parts[5:] {
+		switch {
+		case strings.HasPrefix(opt, "scopes:"):
+			v, err := parseStringListStrict(parseQuotedString(opt[7:]), p.strict)
+			if err != nil {
+				return fmt.Errorf("invalid scopes option: %w", err)
+			}
+			key.Scopes = v
+		case strings.HasPrefix(opt, "expires:"):
+			t, err := time.Parse(time.RFC3339, parseQuotedString(opt[8:]))
+			if err != nil {
+				if p.strict {
+					return fmt.Errorf("invalid expires timestamp: %s", opt[8:])
+				}
+			} else {
+				key.ExpiresAt = t
+			}
+		default:
+			if p.strict {
+				return fmt.Errorf("unknown api_key option: %s", opt)
+			}
+		}
+	}
+	cfg.APIKeys = append(cfg.APIKeys, key)
+	return nil
+}
+
+func (p *DSLParser) parseBoundary(cfg *Config, parts []string) error {
+	if len(parts) < 5 {
+		return fmt.Errorf("boundary requires: <id> <tenant> <name> <actions> <resources>")
+	}
+	actions, err := parseListStrict(parseQuotedString(parts[3]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid boundary actions: %w", err)
+	}
+	resources, err := parseStringListStrict(parseQuotedString(parts[4]), p.strict)
+	if err != nil {
+		return fmt.Errorf("invalid boundary resources: %w", err)
+	}
+	if len(parts) > 5 && p.strict {
+		return fmt.Errorf("unknown boundary option: %s", parts[5])
+	}
+	cfg.PermissionBoundaries = append(cfg.PermissionBoundaries, &PermissionBoundary{ID: parseQuotedString(parts[0]), TenantID: parseQuotedString(parts[1]), Name: parseQuotedString(parts[2]), MaxActions: actions, MaxResources: resources})
+	return nil
+}
+
 func parseList(s string) []Action {
+	actions, _ := parseListStrict(s, false)
+	return actions
+}
+
+func parseListStrict(s string, strict bool) ([]Action, error) {
 	if s == "" {
-		return nil
+		if strict {
+			return nil, fmt.Errorf("empty list")
+		}
+		return nil, nil
 	}
 	if s == "*" {
-		return []Action{"*"}
+		return []Action{"*"}, nil
 	}
 	count := 1
 	for i := 0; i < len(s); i++ {
@@ -467,16 +937,50 @@ func parseList(s string) []Action {
 		if i == len(s) || s[i] == ',' {
 			if i > start {
 				actions = append(actions, Action(s[start:i]))
+			} else if strict {
+				return nil, fmt.Errorf("empty item in %q", s)
 			}
 			start = i + 1
 		}
 	}
-	return actions
+	if strict && len(actions) == 0 {
+		return nil, fmt.Errorf("empty list")
+	}
+	return actions, nil
+}
+
+func parseStringListStrict(s string, strict bool) ([]string, error) {
+	if s == "" {
+		if strict {
+			return nil, fmt.Errorf("empty list")
+		}
+		return nil, nil
+	}
+	items := strings.Split(s, ",")
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == "" {
+			if strict {
+				return nil, fmt.Errorf("empty item in %q", s)
+			}
+			continue
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 func parsePermissions(s string) []Permission {
+	perms, _ := parsePermissionsStrict(s, false)
+	return perms
+}
+
+func parsePermissionsStrict(s string, strict bool) ([]Permission, error) {
 	if s == "" {
-		return nil
+		if strict {
+			return nil, fmt.Errorf("empty permissions")
+		}
+		return nil, nil
 	}
 	count := 1
 	for i := 0; i < len(s); i++ {
@@ -490,54 +994,385 @@ func parsePermissions(s string) []Permission {
 		if i == len(s) || s[i] == ',' {
 			if i > start {
 				part := s[start:i]
+				found := false
 				for j := 0; j < len(part); j++ {
 					if part[j] == ':' {
+						if strict && (j == 0 || j == len(part)-1) {
+							return nil, fmt.Errorf("malformed permission %q", part)
+						}
 						perms = append(perms, Permission{
 							Action:   Action(part[:j]),
 							Resource: part[j+1:],
 						})
+						found = true
 						break
 					}
 				}
+				if strict && !found {
+					return nil, fmt.Errorf("malformed permission %q", part)
+				}
+			} else if strict {
+				return nil, fmt.Errorf("empty permission in %q", s)
 			}
 			start = i + 1
 		}
 	}
-	return perms
+	if strict && len(perms) == 0 {
+		return nil, fmt.Errorf("empty permissions")
+	}
+	return perms, nil
 }
 
 func parseCondition(s string) Expr {
+	expr, _ := parseConditionStrict(s, false)
+	return expr
+}
+
+func parseConditionStrict(s string, strict bool) (Expr, error) {
 	if s == "" || s == "true" {
-		return &TrueExpr{}
+		return &TrueExpr{}, nil
 	}
-	for i := 0; i < len(s); i++ {
-		if i+1 < len(s) && s[i:i+2] == "!=" {
-			return &NeExpr{Field: s[:i], Value: s[i+2:]}
+	expr, err := newConditionParser(s).parse()
+	if err == nil {
+		return expr, nil
+	}
+	if strict {
+		return nil, err
+	}
+	return &TrueExpr{}, nil
+}
+
+func ParseCondition(s string) (Expr, error) {
+	return parseConditionStrict(s, true)
+}
+
+func FormatCondition(expr Expr) string {
+	return conditionToDSL(expr)
+}
+
+type conditionParser struct {
+	input string
+	pos   int
+}
+
+func newConditionParser(input string) *conditionParser {
+	return &conditionParser{input: input}
+}
+
+func (p *conditionParser) parse() (Expr, error) {
+	expr, err := p.parseOr()
+	if err != nil {
+		return nil, err
+	}
+	p.skipSpace()
+	if p.pos != len(p.input) {
+		return nil, fmt.Errorf("unsupported condition near %q", p.input[p.pos:])
+	}
+	return expr, nil
+}
+
+func (p *conditionParser) parseOr() (Expr, error) {
+	left, err := p.parseAnd()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		p.skipSpace()
+		if !p.consume("||") && !p.consumeWord("OR") {
+			return left, nil
 		}
-		if s[i] == '=' {
-			return &EqExpr{Field: s[:i], Value: s[i+1:]}
+		right, err := p.parseAnd()
+		if err != nil {
+			return nil, err
 		}
-		if s[i] == '@' {
-			count := 1
-			for j := i + 1; j < len(s); j++ {
-				if s[j] == ',' {
-					count++
-				}
+		left = &OrExpr{Left: left, Right: right}
+	}
+}
+
+func (p *conditionParser) parseAnd() (Expr, error) {
+	left, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+	for {
+		p.skipSpace()
+		if !p.consume("&&") && !p.consumeWord("AND") {
+			return left, nil
+		}
+		right, err := p.parsePrimary()
+		if err != nil {
+			return nil, err
+		}
+		left = &AndExpr{Left: left, Right: right}
+	}
+}
+
+func (p *conditionParser) parsePrimary() (Expr, error) {
+	p.skipSpace()
+	if p.consume("(") {
+		expr, err := p.parseOr()
+		if err != nil {
+			return nil, err
+		}
+		p.skipSpace()
+		if !p.consume(")") {
+			return nil, fmt.Errorf("missing closing parenthesis")
+		}
+		return expr, nil
+	}
+	return p.parseAtom()
+}
+
+func (p *conditionParser) parseAtom() (Expr, error) {
+	field := p.readField()
+	if field == "" {
+		return nil, fmt.Errorf("expected condition")
+	}
+	p.skipSpace()
+	if p.consume("(") {
+		return p.parseFunction(field)
+	}
+	if p.consumeWord("IN") {
+		p.skipSpace()
+		if !p.consume("[") {
+			return nil, fmt.Errorf("membership requires [values]")
+		}
+		raw := p.readValue("]")
+		if !p.consume("]") {
+			return nil, fmt.Errorf("membership requires closing ]")
+		}
+		raw = strings.ReplaceAll(raw, ",", " ")
+		parts := strings.Fields(raw)
+		if len(parts) == 0 {
+			return nil, fmt.Errorf("empty membership values")
+		}
+		values := make([]any, 0, len(parts))
+		for _, part := range parts {
+			values = append(values, strings.Trim(part, `"'`))
+		}
+		return &InExpr{Field: field, Values: values}, nil
+	}
+	switch {
+	case p.consume("!="):
+		value := p.readValue(")&|")
+		if value == "" {
+			return nil, fmt.Errorf("malformed inequality")
+		}
+		return &NeExpr{Field: field, Value: value}, nil
+	case p.consume(">="):
+		value := p.readValue(")&|")
+		if value == "" {
+			return nil, fmt.Errorf("malformed comparison")
+		}
+		return &GteExpr{Field: field, Value: parseScalar(value)}, nil
+	case p.consume("=="):
+		value := p.readValue(")&|")
+		if value == "" {
+			return nil, fmt.Errorf("malformed equality")
+		}
+		return &EqExpr{Field: field, Value: value}, nil
+	case p.consume("="):
+		value := p.readValue(")&|")
+		if value == "" {
+			return nil, fmt.Errorf("malformed equality")
+		}
+		return &EqExpr{Field: field, Value: value}, nil
+	case p.consume("@"):
+		raw := p.readValue(")&|")
+		if raw == "" {
+			return nil, fmt.Errorf("malformed membership")
+		}
+		parts := strings.Split(raw, ",")
+		values := make([]any, 0, len(parts))
+		for _, part := range parts {
+			if part == "" {
+				return nil, fmt.Errorf("empty membership value")
 			}
-			values := make([]any, 0, count)
-			start := i + 1
-			for j := i + 1; j <= len(s); j++ {
-				if j == len(s) || s[j] == ',' {
-					if j > start {
-						values = append(values, s[start:j])
-					}
-					start = j + 1
-				}
-			}
-			return &InExpr{Field: s[:i], Values: values}
+			values = append(values, part)
+		}
+		return &InExpr{Field: field, Values: values}, nil
+	default:
+		return nil, fmt.Errorf("unsupported condition %q", p.input)
+	}
+}
+
+func (p *conditionParser) parseFunction(name string) (Expr, error) {
+	args := make([]string, 0, 3)
+	for {
+		p.skipSpace()
+		if p.consume(")") {
+			break
+		}
+		arg := p.readValue(",)")
+		if arg == "" {
+			return nil, fmt.Errorf("empty argument in %s", name)
+		}
+		args = append(args, arg)
+		p.skipSpace()
+		if p.consume(")") {
+			break
+		}
+		if !p.consume(",") {
+			return nil, fmt.Errorf("expected comma in %s", name)
 		}
 	}
-	return &TrueExpr{}
+	switch name {
+	case "regex":
+		if len(args) != 2 {
+			return nil, fmt.Errorf("regex requires field and pattern")
+		}
+		return &RegexExpr{Field: args[0], Regex: args[1]}, nil
+	case "cidr", "ip_in_cidr":
+		if len(args) != 1 {
+			return nil, fmt.Errorf("cidr requires one CIDR argument")
+		}
+		return &CIDRExpr{CIDR: args[0]}, nil
+	case "time_between":
+		if len(args) != 2 {
+			return nil, fmt.Errorf("time_between requires start and end")
+		}
+		return &TimeBetweenExpr{Start: args[0], End: args[1]}, nil
+	case "range":
+		if len(args) != 3 {
+			return nil, fmt.Errorf("range requires field, min, max")
+		}
+		min, err := strconv.ParseFloat(args[1], 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid range min")
+		}
+		max, err := strconv.ParseFloat(args[2], 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid range max")
+		}
+		return &RangeExpr{Field: args[0], Min: min, Max: max}, nil
+	default:
+		return nil, fmt.Errorf("unsupported condition function %s", name)
+	}
+}
+
+func (p *conditionParser) skipSpace() {
+	for p.pos < len(p.input) && (p.input[p.pos] == ' ' || p.input[p.pos] == '\t') {
+		p.pos++
+	}
+}
+
+func (p *conditionParser) consume(s string) bool {
+	p.skipSpace()
+	if strings.HasPrefix(p.input[p.pos:], s) {
+		p.pos += len(s)
+		return true
+	}
+	return false
+}
+
+func (p *conditionParser) consumeWord(s string) bool {
+	p.skipSpace()
+	if !strings.HasPrefix(p.input[p.pos:], s) {
+		return false
+	}
+	end := p.pos + len(s)
+	if end < len(p.input) {
+		ch := p.input[end]
+		if ch != ' ' && ch != '\t' && ch != ')' {
+			return false
+		}
+	}
+	p.pos = end
+	return true
+}
+
+func (p *conditionParser) readValue(stoppers string) string {
+	p.skipSpace()
+	if p.pos >= len(p.input) {
+		return ""
+	}
+	if p.input[p.pos] == '"' || p.input[p.pos] == '\'' || p.input[p.pos] == '`' {
+		quote := p.input[p.pos]
+		p.pos++
+		start := p.pos
+		for p.pos < len(p.input) && p.input[p.pos] != quote {
+			p.pos++
+		}
+		if p.pos >= len(p.input) {
+			return ""
+		}
+		out := p.input[start:p.pos]
+		p.pos++
+		return out
+	}
+	start := p.pos
+	for p.pos < len(p.input) {
+		if strings.HasPrefix(p.input[p.pos:], " AND ") || strings.HasPrefix(p.input[p.pos:], " OR ") {
+			break
+		}
+		if strings.ContainsRune(stoppers, rune(p.input[p.pos])) {
+			break
+		}
+		p.pos++
+	}
+	return strings.TrimSpace(p.input[start:p.pos])
+}
+
+func (p *conditionParser) readField() string {
+	p.skipSpace()
+	start := p.pos
+	for p.pos < len(p.input) {
+		ch := p.input[p.pos]
+		if ch == ' ' || ch == '\t' || strings.ContainsRune("!=>@(),&|", rune(ch)) {
+			break
+		}
+		p.pos++
+	}
+	return strings.TrimSpace(p.input[start:p.pos])
+}
+
+func parseScalar(s string) any {
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f
+	}
+	return s
+}
+
+func conditionToDSL(expr Expr) string {
+	switch e := expr.(type) {
+	case nil:
+		return "true"
+	case *TrueExpr:
+		return "true"
+	case *EqExpr:
+		return e.Field + "=" + fmt.Sprint(e.Value)
+	case *NeExpr:
+		return e.Field + "!=" + fmt.Sprint(e.Value)
+	case *GteExpr:
+		return e.Field + ">=" + fmt.Sprint(e.Value)
+	case *InExpr:
+		parts := make([]string, 0, len(e.Values))
+		for _, v := range e.Values {
+			parts = append(parts, fmt.Sprint(v))
+		}
+		return e.Field + "@" + strings.Join(parts, ",")
+	case *AndExpr:
+		return "(" + conditionToDSL(e.Left) + "&&" + conditionToDSL(e.Right) + ")"
+	case *OrExpr:
+		return "(" + conditionToDSL(e.Left) + "||" + conditionToDSL(e.Right) + ")"
+	case *RegexExpr:
+		return "regex(" + e.Field + "," + e.Regex + ")"
+	case *CIDRExpr:
+		return "cidr(" + e.CIDR + ")"
+	case *TimeBetweenExpr:
+		return "time_between(" + e.Start + "," + e.End + ")"
+	case *RangeExpr:
+		return "range(" + e.Field + "," + strconv.FormatFloat(e.Min, 'f', -1, 64) + "," + strconv.FormatFloat(e.Max, 'f', -1, 64) + ")"
+	default:
+		return expr.String()
+	}
+}
+
+func validEffect(effect Effect) bool {
+	return effect == EffectAllow || effect == EffectDeny
 }
 
 // Binary Protocol V2 - Compact format

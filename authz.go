@@ -663,6 +663,11 @@ type RoleMembershipStore interface {
 	ListRoles(ctx context.Context, subjectID string) ([]string, error)
 }
 
+type EnumerableRoleMembershipStore interface {
+	RoleMembershipStore
+	ListRoleMemberships(ctx context.Context) ([]RoleMembership, error)
+}
+
 // UserStatus represents the lifecycle state of a user or service account.
 type UserStatus string
 

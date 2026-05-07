@@ -192,6 +192,32 @@ engine cache_ttl=<ms> attr_ttl=<ms> batch_size=<n> flush_interval=<ms> workers=<
 
 The parser supports quoted strings, comments, comma-separated actions/resources, role permissions as `action:resource`, and route resources with additional colons such as `GET:route:GET:/admin/*`.
 
+`NewDSLParser()` is strict by default. It rejects malformed conditions, invalid effects, unknown options, invalid numbers/timestamps, malformed lists, malformed permissions, and unterminated quotes with line-numbered errors. Legacy best-effort parsing is still available through `NewPermissiveDSLParser()` or `NewDSLParser().SetStrict(false)`.
+
+Validate and plan configuration changes before applying them:
+
+```bash
+go run ./cmd/authz-config validate examples/config.authz
+go run ./cmd/authz-config plan examples/config.authz --sync
+go run ./cmd/authz-config apply examples/config.authz --sync --dry-run
+go run ./cmd/authz-config fmt examples/config.authz
+go run ./cmd/authz-config plan examples/config.authz --sync --sqlite ./authz.db
+```
+
+`ValidateConfig` rejects semantic errors such as duplicate IDs, missing tenant/role references, empty action/resource sets, nil policy conditions, and tenant hierarchy cycles. `LintConfig` reports warnings for risky-but-valid config such as `*:*`, `route:*`, unused roles, empty-rule tenants, and unusual ACL subjects.
+
+`ApplyConfig` remains additive/upsert-only for compatibility. For declarative workflows, use `PlanConfigApply` and `ApplyConfigPlan`; `ApplyModeSync` reconciles policies, roles, ACLs, tenants, and role memberships when the membership store implements `EnumerableRoleMembershipStore`.
+
+The DSL also supports file includes, boolean condition logic (`&&`, `||`, parentheses), comparisons such as `>=`, and advanced condition functions like `regex`, `cidr`, `time_between`, and `range`. IAM directives for users, groups, scopes, service accounts, invitations, API keys, and permission boundaries are parsed into `Config` and can be applied with `ApplyConfigIAM` when the matching stores are supplied.
+
+Config signing is built into the CLI:
+
+```bash
+go run ./cmd/authz-config sign-keygen
+go run ./cmd/authz-config sign config.authz <private-key> config.signed.authz
+go run ./cmd/authz-config verify config.signed.authz <public-key>
+```
+
 See [DSL.md](./DSL.md), [DSL_QUICKSTART.md](./DSL_QUICKSTART.md), and [examples/config.authz](./examples/config.authz).
 
 ## Admin HTTP API
