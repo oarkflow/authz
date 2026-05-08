@@ -1,0 +1,81 @@
+{
+  "name": "authz-dsl",
+  "displayName": "AuthZ DSL",
+  "description": "Syntax highlighting, snippets, diagnostics, hovers, and IntelliSense for .authz authorization configuration files.",
+  "version": "0.2.3",
+  "publisher": "oarkflow",
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Snippets",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:authz",
+    "workspaceContains:**/*.authz",
+    "workspaceContains:**/*.dsl",
+    "onStartupFinished"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "authz",
+        "aliases": [
+          "AuthZ DSL",
+          "authz"
+        ],
+        "extensions": [
+          ".authz",
+          ".dsl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "authz",
+        "scopeName": "source.authz",
+        "path": "./syntaxes/authz.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "authz",
+        "path": "./snippets/authz.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "authz.showReference",
+        "title": "AuthZ DSL: Show Syntax Reference"
+      },
+      {
+        "command": "authz.showStatus",
+        "title": "AuthZ DSL: Show Extension Status"
+      },
+      {
+        "command": "authz.validateFile",
+        "title": "AuthZ DSL: Validate File"
+      },
+      {
+        "command": "authz.formatFile",
+        "title": "AuthZ DSL: Format File"
+      },
+      {
+        "command": "authz.previewPlan",
+        "title": "AuthZ DSL: Preview Apply Plan"
+      },
+      {
+        "command": "authz.showPermissionGraph",
+        "title": "AuthZ DSL: Show Permission Graph"
+      },
+      {
+        "command": "authz.explainSymbol",
+        "title": "AuthZ DSL: Explain Symbol"
+      }
+    ]
+  }
+}

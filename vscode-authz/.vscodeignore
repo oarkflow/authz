@@ -1,0 +1,10 @@
+.vscode/**
+.git/**
+.gitignore
+node_modules/**
+pnpm-lock.yaml
+*.vsix
+test/**
+out/**
+coverage/**
+*.log

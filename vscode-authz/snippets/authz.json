@@ -1,0 +1,87 @@
+{
+  "Tenant": {
+    "prefix": "tenant",
+    "body": "tenant ${1:id} \"${2:Display Name}\"${3: parent:${4:parent_id}}",
+    "description": "Define a tenant"
+  },
+  "Policy": {
+    "prefix": "policy",
+    "body": "policy ${1:id} ${2:tenant} ${3|allow,deny|} ${4:read} ${5:document:*} ${6:true} priority:${7:10}",
+    "description": "Define an ABAC policy"
+  },
+  "Role": {
+    "prefix": "role",
+    "body": "role ${1:id} ${2:tenant} \"${3:Role Name}\" ${4:read:document:*}${5: inherits:${6:parent_role}}",
+    "description": "Define an RBAC role"
+  },
+  "ACL": {
+    "prefix": "acl",
+    "body": "acl ${1:id} ${2:document:123} ${3:user:alice} ${4:read} ${5|allow,deny|}",
+    "description": "Define an ACL grant or denial"
+  },
+  "Member": {
+    "prefix": "member",
+    "body": "member ${1:user:alice} ${2:role_id}",
+    "description": "Assign a role to a subject"
+  },
+  "User": {
+    "prefix": "user",
+    "body": "user ${1:id} ${2:tenant} ${3:user@example.com} \"${4:Full Name}\" status:${5|active,suspended,deactivated|}",
+    "description": "Define a user"
+  },
+  "Group": {
+    "prefix": "group",
+    "body": "group ${1:id} ${2:tenant} \"${3:Group Name}\"${4: parent:${5:parent_group}}",
+    "description": "Define a group"
+  },
+  "Scope": {
+    "prefix": "scope",
+    "body": "scope ${1:id} ${2:tenant} \"${3:Scope Name}\"${4: parent:${5:parent_scope}}",
+    "description": "Define a scope"
+  },
+  "Service Account": {
+    "prefix": "service_account",
+    "body": "service_account ${1:id} ${2:tenant} \"${3:Service Name}\" client:${4:client_id} roles:${5:role_id} scopes:${6:scope_id} status:${7|active,suspended,deactivated|}",
+    "description": "Define a service account"
+  },
+  "Invitation": {
+    "prefix": "invitation",
+    "body": "invitation ${1:id} ${2:tenant} ${3:user@example.com} ${4:role_id} groups:${5:group_id} status:${6|pending,accepted,expired,revoked|}",
+    "description": "Define an invitation"
+  },
+  "API Key": {
+    "prefix": "api_key",
+    "body": "api_key ${1:id} ${2:tenant} ${3:user_id} ${4:prefix} \"${5:Key Name}\" scopes:${6:scope_id}",
+    "description": "Define an API key"
+  },
+  "Boundary": {
+    "prefix": "boundary",
+    "body": "boundary ${1:id} ${2:tenant} \"${3:Boundary Name}\" ${4:read,write} ${5:document:*}",
+    "description": "Define a permission boundary"
+  },
+  "Engine": {
+    "prefix": "engine",
+    "body": "engine cache_ttl=${1:5000} attr_ttl=${2:10000} batch_size=${3:128} flush_interval=${4:50} workers=${5:8}",
+    "description": "Configure engine runtime settings"
+  },
+  "Include": {
+    "prefix": "include",
+    "body": "include \"${1:./other.authz}\"",
+    "description": "Include another .authz file"
+  },
+  "Condition: owner": {
+    "prefix": "cond-owner",
+    "body": "resource.owner_id=subject.id",
+    "description": "Subject owns the resource"
+  },
+  "Condition: role membership": {
+    "prefix": "cond-role",
+    "body": "subject.roles@${1:admin},${2:superadmin}",
+    "description": "Subject has any listed role"
+  },
+  "Condition: boolean expression": {
+    "prefix": "cond-and-or",
+    "body": "(${1:subject.roles@admin} || ${2:resource.owner_id=subject.id}) && ${3:subject.attrs.level>=3}",
+    "description": "Composed condition"
+  }
+}

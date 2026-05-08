@@ -1,0 +1,30 @@
+# AuthZ DSL VS Code Extension
+
+Syntax highlighting, snippets, hovers, diagnostics, formatting, and IntelliSense for `.authz` and `.dsl` files.
+
+## Features
+
+- TextMate syntax highlighting for directives, options, engine keys, condition fields, condition functions, actions, resources, effects, statuses, comments, and strings.
+- Snippets for every supported directive.
+- IntelliSense for directives, directive-specific options, actions, resources, effects, statuses, engine keys, condition fields, condition operators, and condition helpers.
+- Same-file completions for tenant, role, user, group, and scope IDs.
+- Hovers for directives and condition functions.
+- Lightweight diagnostics for unknown directives/options, bad effects, malformed role permissions, duplicate IDs, empty list items, invalid expiration timestamps, and unterminated quotes.
+- Basic document formatting that trims trailing whitespace and normalizes inline comment spacing.
+
+## Run Locally
+
+1. Open this folder in VS Code:
+
+   ```bash
+   code vscode-authz
+   ```
+
+2. Press `F5` to launch an Extension Development Host.
+3. Open `examples/config.authz` from this repository in the new VS Code window.
+
+The extension is dependency-free at runtime and uses plain JavaScript, so it does not need a compile step.
+
+## Syntax Reference
+
+Run `AuthZ DSL: Show Syntax Reference` from the command palette for an in-editor quick reference.

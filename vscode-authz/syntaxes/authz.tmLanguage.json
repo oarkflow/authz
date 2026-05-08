@@ -1,0 +1,238 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "AuthZ DSL",
+  "scopeName": "source.authz",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#directiveLines" },
+    { "include": "#strings" },
+    { "include": "#options" },
+    { "include": "#conditions" },
+    { "include": "#subjects" },
+    { "include": "#resources" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.number-sign.authz",
+          "match": "#.*$"
+        }
+      ]
+    },
+    "directiveLines": {
+      "patterns": [
+        {
+          "name": "meta.directive.policy.authz",
+          "match": "^(\\s*)(policy)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)(allow|deny)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.policy.authz" },
+            "6": { "name": "variable.parameter.tenant.authz" },
+            "8": { "name": "constant.language.effect.authz" },
+            "10": { "name": "support.constant.action-list.authz" },
+            "12": { "name": "entity.name.type.resource-pattern.authz" },
+            "14": { "name": "meta.condition.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.role.authz",
+          "match": "^(\\s*)(role)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)(\"[^\"]*\"|'[^']*'|`[^`]*`|[^\\s#]+)(\\s+)([^\\s#]+)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.role.authz" },
+            "6": { "name": "variable.parameter.tenant.authz" },
+            "8": { "name": "string.quoted.role-name.authz" },
+            "10": { "name": "support.constant.permission-list.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.acl.authz",
+          "match": "^(\\s*)(acl)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)(allow|deny)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.acl.authz" },
+            "6": { "name": "entity.name.type.resource-pattern.authz" },
+            "8": { "name": "entity.name.tag.subject.authz" },
+            "10": { "name": "support.constant.action-list.authz" },
+            "12": { "name": "constant.language.effect.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.tenant.authz",
+          "match": "^(\\s*)(tenant)(\\s+)([^\\s#]+)(\\s+)(\"[^\"]*\"|'[^']*'|`[^`]*`|[^\\s#]+)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.tenant.authz" },
+            "6": { "name": "string.quoted.tenant-name.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.member.authz",
+          "match": "^(\\s*)(member)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.tag.subject.authz" },
+            "6": { "name": "variable.parameter.role.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.identity.authz",
+          "match": "^(\\s*)(user|group|scope|service_account|invitation|api_key|boundary)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.definition.authz" },
+            "6": { "name": "variable.parameter.tenant.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.engine.authz",
+          "match": "^(\\s*)(engine)\\b",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.include.authz",
+          "match": "^(\\s*)(include)(\\s+)(\"[^\"]*\"|'[^']*'|`[^`]*`|[^\\s#]+)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "string.quoted.include-path.authz" }
+          }
+        },
+        {
+          "name": "keyword.control.directive.authz",
+          "match": "^\\s*\\b(include|tenant|policy|role|acl|member|engine|user|group|scope|service_account|invitation|api_key|boundary)\\b"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.authz",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "include": "#escapes" }]
+        },
+        {
+          "name": "string.quoted.single.authz",
+          "begin": "'",
+          "end": "'",
+          "patterns": [{ "include": "#escapes" }]
+        },
+        {
+          "name": "string.quoted.backtick.authz",
+          "begin": "`",
+          "end": "`"
+        }
+      ]
+    },
+    "escapes": {
+      "patterns": [
+        {
+          "name": "constant.character.escape.authz",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "options": {
+      "patterns": [
+        {
+          "name": "support.type.option.authz",
+          "match": "(?<![A-Za-z0-9_-])(parent|priority|inherits|owner|expires|status|desc|client|roles|scopes|groups|invited_by):"
+        },
+        {
+          "name": "support.type.engine-option.authz",
+          "match": "(?<![A-Za-z0-9_-])(cache_ttl|attr_ttl|batch_size|flush_interval|workers)="
+        }
+      ]
+    },
+    "conditions": {
+      "patterns": [
+        {
+          "name": "support.function.condition.authz",
+          "match": "(?<![A-Za-z0-9_-])(regex|cidr|ip_in_cidr|time_between|range)(?=\\()"
+        },
+        {
+          "name": "variable.other.condition-field.authz",
+          "match": "(?<![A-Za-z0-9_-])(subject\\.(?:id|type|tenant_id|roles|groups|attrs\\.[A-Za-z_][\\w.-]*)|resource\\.(?:id|type|tenant_id|owner_id|attrs\\.[A-Za-z_][\\w.-]*)|env\\.(?:tenant_id|region|time|ip|extra\\.[A-Za-z_][\\w.-]*)|action)(?![A-Za-z0-9_-])"
+        },
+        {
+          "name": "keyword.operator.logical.authz",
+          "match": "(?<![A-Za-z0-9_-])(AND|OR|IN)(?![A-Za-z0-9_-])|&&|\\|\\|"
+        },
+        {
+          "name": "keyword.operator.comparison.authz",
+          "match": "==|!=|>=|=|@"
+        }
+      ]
+    },
+    "subjects": {
+      "patterns": [
+        {
+          "name": "entity.name.tag.subject.authz",
+          "match": "(?<![A-Za-z0-9_-])(user|group|service):[A-Za-z0-9_.@-]+"
+        },
+        {
+          "name": "entity.name.tag.subject.guest.authz",
+          "match": "(?<![A-Za-z0-9_-])guest(?![A-Za-z0-9_-])"
+        }
+      ]
+    },
+    "resources": {
+      "patterns": [
+        {
+          "name": "entity.name.type.resource.authz",
+          "match": "(?<![A-Za-z0-9_-])[A-Za-z_][\\w-]*(?=:)"
+        },
+        {
+          "name": "constant.other.wildcard.authz",
+          "match": "\\*"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.effect.authz",
+          "match": "(?<![A-Za-z0-9_-])(allow|deny)(?![A-Za-z0-9_-])"
+        },
+        {
+          "name": "constant.language.status.authz",
+          "match": "(?<![A-Za-z0-9_-])(active|suspended|deactivated|pending|accepted|expired|revoked)(?![A-Za-z0-9_-])"
+        },
+        {
+          "name": "constant.language.boolean.authz",
+          "match": "(?<![A-Za-z0-9_-])true(?![A-Za-z0-9_-])"
+        },
+        {
+          "name": "support.constant.action.authz",
+          "match": "(?<![A-Za-z0-9_-])(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|read|write|delete|create|update|admin|share)(?![A-Za-z0-9_-])"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.authz",
+          "match": "(?<![A-Za-z0-9_-])\\d+(?:\\.\\d+)?(?![A-Za-z0-9_-])"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.separator.comma.authz",
+          "match": ","
+        },
+        {
+          "name": "punctuation.separator.key-value.authz",
+          "match": ":|="
+        }
+      ]
+    }
+  }
+}
