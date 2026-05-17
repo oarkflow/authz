@@ -8,6 +8,21 @@ A minimal, high-performance domain-specific language for authz configuration.
 <directive> <args...> [options...]
 ```
 
+Large directives can also use block form:
+
+```authz
+directive id {
+  field value
+  list_field [
+    value1
+    value2
+  ]
+  nested_field {
+    expression
+  }
+}
+```
+
 - Lines starting with `#` are comments
 - Inline comments are supported outside quoted strings
 - Whitespace-separated arguments
@@ -56,6 +71,15 @@ tenant org1 "Engineering" parent:root
 tenant team1 "Backend Team" parent:org1
 ```
 
+Block form:
+
+```authz
+tenant org1 {
+  name "Engineering"
+  parent root
+}
+```
+
 ### policy
 Define an ABAC policy.
 
@@ -79,6 +103,36 @@ policy allow-admin org1 allow * * subject.roles@admin,superadmin priority:100
 policy deny-sensitive org1 deny read,write document:secret:* subject.clearance=low
 policy route-owner org1 allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
 policy route-admin org1 allow GET,POST,PUT,DELETE route:* subject.roles@admin priority:90
+```
+
+Block form:
+
+```authz
+policy allow-admin {
+  tenant org1
+  effect allow
+  priority 100
+
+  actions [
+    read
+    write
+    delete
+    share
+  ]
+
+  resources [
+    document:*
+    project:*
+    route:*
+  ]
+
+  when {
+    subject.roles contains any [
+      admin
+      superadmin
+    ]
+  }
+}
 ```
 
 ### role
@@ -106,6 +160,37 @@ role lead team1 "Team Lead" *:project:* inherits:editor
 role route-admin org1 "Route Admin" GET:route:GET:/admin/*,POST:route:POST:/admin/*
 ```
 
+Block form:
+
+```authz
+role editor {
+  tenant org1
+  name "Editor"
+
+  permissions [
+    read:document:*
+    write:document:*
+    delete:document:*
+  ]
+}
+
+role owner {
+  tenant org1
+  name "Owner"
+
+  permissions {
+    read:*
+  }
+
+  owner_actions [
+    read
+    write
+    delete
+    share
+  ]
+}
+```
+
 ### acl
 Define a fine-grained access control entry.
 
@@ -130,6 +215,17 @@ acl acl-route-public route:GET:/public/info guest GET allow
 acl temp-access document:123 user:charlie read allow expires:2024-12-31T23:59:59Z
 ```
 
+Block form:
+
+```authz
+acl acl-route-public {
+  resource route:GET:/public/info
+  subject guest
+  actions [GET]
+  effect allow
+}
+```
+
 ### member
 Assign a role to a subject.
 
@@ -142,6 +238,22 @@ member <subject> <role>
 member user:alice admin
 member user:bob editor
 member group:engineering viewer
+```
+
+Block forms:
+
+```authz
+member user:alice {
+  roles [
+    admin
+    route-admin
+  ]
+}
+
+members {
+  user:bob [editor]
+  user:charlie [viewer]
+}
 ```
 
 ### engine
@@ -161,6 +273,18 @@ engine <key>=<value>...
 **Example:**
 ```
 engine cache_ttl=5000 attr_ttl=10000 batch_size=128 flush_interval=50 workers=8
+```
+
+Block form:
+
+```authz
+engine {
+  cache_ttl 5000
+  attr_ttl 10000
+  batch_size 128
+  flush_interval 50
+  workers 8
+}
 ```
 
 ### IAM directives
@@ -190,6 +314,8 @@ Example: `subject.type=user`
 ### Membership
 ```
 field@value1,value2,value3
+field contains any [value1, value2, value3]
+field has_any [value1, value2, value3]
 ```
 Example: `subject.roles@admin,editor`
 

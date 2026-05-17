@@ -4,25 +4,100 @@
     "body": "tenant ${1:id} \"${2:Display Name}\"${3: parent:${4:parent_id}}",
     "description": "Define a tenant"
   },
+  "Tenant Block": {
+    "prefix": "tenant-block",
+    "body": [
+      "tenant ${1:id} {",
+      "  name \"${2:Display Name}\"",
+      "  ${3:parent ${4:parent_id}}",
+      "}"
+    ],
+    "description": "Define a tenant using block syntax"
+  },
   "Policy": {
     "prefix": "policy",
     "body": "policy ${1:id} ${2:tenant} ${3|allow,deny|} ${4:read} ${5:document:*} ${6:true} priority:${7:10}",
     "description": "Define an ABAC policy"
+  },
+  "Policy Block": {
+    "prefix": "policy-block",
+    "body": [
+      "policy ${1:id} {",
+      "  tenant ${2:tenant}",
+      "  effect ${3|allow,deny|}",
+      "  actions [",
+      "    ${4:read}",
+      "  ]",
+      "  resources [",
+      "    ${5:document:*}",
+      "  ]",
+      "  when {",
+      "    ${6:subject.type == \"user\"}",
+      "  }",
+      "  priority ${7:10}",
+      "}"
+    ],
+    "description": "Define an ABAC policy using block syntax"
   },
   "Role": {
     "prefix": "role",
     "body": "role ${1:id} ${2:tenant} \"${3:Role Name}\" ${4:read:document:*}${5: inherits:${6:parent_role}}",
     "description": "Define an RBAC role"
   },
+  "Role Block": {
+    "prefix": "role-block",
+    "body": [
+      "role ${1:id} {",
+      "  tenant ${2:tenant}",
+      "  name \"${3:Role Name}\"",
+      "  permissions [",
+      "    ${4:read:document:*}",
+      "  ]",
+      "}"
+    ],
+    "description": "Define an RBAC role using block syntax"
+  },
   "ACL": {
     "prefix": "acl",
     "body": "acl ${1:id} ${2:document:123} ${3:user:alice} ${4:read} ${5|allow,deny|}",
     "description": "Define an ACL grant or denial"
   },
+  "ACL Block": {
+    "prefix": "acl-block",
+    "body": [
+      "acl ${1:id} {",
+      "  resource ${2:document:123}",
+      "  subject ${3:user:alice}",
+      "  actions [${4:read}]",
+      "  effect ${5|allow,deny|}",
+      "}"
+    ],
+    "description": "Define an ACL grant or denial using block syntax"
+  },
   "Member": {
     "prefix": "member",
     "body": "member ${1:user:alice} ${2:role_id}",
     "description": "Assign a role to a subject"
+  },
+  "Member Block": {
+    "prefix": "member-block",
+    "body": [
+      "member ${1:user:alice} {",
+      "  roles [",
+      "    ${2:role_id}",
+      "  ]",
+      "}"
+    ],
+    "description": "Assign multiple roles to one subject using block syntax"
+  },
+  "Members Block": {
+    "prefix": "members",
+    "body": [
+      "members {",
+      "  ${1:user:alice} [${2:role_id}]",
+      "}"
+    ],
+    "description": "Assign roles to many subjects using block syntax"
   },
   "User": {
     "prefix": "user",
@@ -64,6 +139,19 @@
     "body": "engine cache_ttl=${1:5000} attr_ttl=${2:10000} batch_size=${3:128} flush_interval=${4:50} workers=${5:8}",
     "description": "Configure engine runtime settings"
   },
+  "Engine Block": {
+    "prefix": "engine-block",
+    "body": [
+      "engine {",
+      "  cache_ttl ${1:5000}",
+      "  attr_ttl ${2:10000}",
+      "  batch_size ${3:128}",
+      "  flush_interval ${4:50}",
+      "  workers ${5:8}",
+      "}"
+    ],
+    "description": "Configure engine runtime settings using block syntax"
+  },
   "Include": {
     "prefix": "include",
     "body": "include \"${1:./other.authz}\"",
@@ -78,6 +166,11 @@
     "prefix": "cond-role",
     "body": "subject.roles@${1:admin},${2:superadmin}",
     "description": "Subject has any listed role"
+  },
+  "Condition: role membership block style": {
+    "prefix": "cond-role-any",
+    "body": "subject.roles contains any [${1:admin}, ${2:superadmin}]",
+    "description": "Subject has any listed role using expression syntax"
   },
   "Condition: boolean expression": {
     "prefix": "cond-and-or",

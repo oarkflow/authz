@@ -5,9 +5,9 @@ Syntax highlighting, snippets, hovers, diagnostics, formatting, and IntelliSense
 ## Features
 
 - TextMate syntax highlighting for directives, options, engine keys, condition fields, condition functions, actions, resources, effects, statuses, comments, and strings.
-- Snippets for every supported directive.
+- Snippets for every supported directive, including block-form policies, roles, ACLs, members, tenants, and engine config.
 - IntelliSense for directives, directive-specific options, actions, resources, effects, statuses, engine keys, condition fields, condition operators, and condition helpers.
-- Same-file completions for tenant, role, user, group, and scope IDs.
+- Same-file completions for tenant, role, user, group, and scope IDs in both inline and block syntax.
 - Hovers for directives and condition functions.
 - Lightweight diagnostics for unknown directives/options, bad effects, malformed role permissions, duplicate IDs, empty list items, invalid expiration timestamps, and unterminated quotes.
 - Basic document formatting that trims trailing whitespace and normalizes inline comment spacing.
@@ -28,3 +28,18 @@ The extension is dependency-free at runtime and uses plain JavaScript, so it doe
 ## Syntax Reference
 
 Run `AuthZ DSL: Show Syntax Reference` from the command palette for an in-editor quick reference.
+
+Block syntax is supported:
+
+```authz
+policy allow-admin {
+  tenant org1
+  effect allow
+  actions [read write delete]
+  resources [document:*]
+  when {
+    subject.roles contains any [admin, superadmin]
+  }
+  priority 100
+}
+```

@@ -1,46 +1,235 @@
 # AuthZ DSL Configuration
-# Syntax: <directive> <args...> [options...]
+# Syntax:
+#   <directive> <args...> [options...]
+#   <directive> <id> {
+#     field value
+#     list_field [
+#       value
+#     ]
+#   }
 #
 # Note: This file represents the initial static configuration.
 # The system supports dynamic updates (Tenants, Policies, ACLs, Roles)
 # at runtime via the Engine API or Admin HTTP Server.
 
 # Define tenants
-tenant root "Root Organization"
-tenant org1 "Engineering Org" parent:root
-tenant team1 "Backend Team" parent:org1
+tenant root {
+  name "Root Organization"
+}
 
-# Define policies: <id> <tenant> <effect> <actions> <resources> <condition> [priority:<n>]
-policy allow-read org1 allow read document:* subject.type=user priority:10
-policy allow-admin org1 allow * * subject.roles@admin,superadmin priority:100
-policy deny-sensitive org1 deny read,write,delete document:sensitive:* subject.attrs.clearance!=high priority:50
-policy owner-access org1 allow read,write,delete document:* resource.owner_id=subject.id priority:50
+tenant org1 {
+  name "Engineering Org"
+  parent root
+}
+
+tenant team1 {
+  name "Backend Team"
+  parent org1
+}
+
+# Define policies
+policy allow-read {
+  tenant org1
+  effect allow
+  actions [read]
+  resources [document:*]
+  when {
+    subject.type == "user"
+  }
+  priority 10
+}
+
+policy allow-admin {
+  tenant org1
+  effect allow
+  actions [*]
+  resources [*]
+  when {
+    subject.roles contains any [
+      admin
+      superadmin
+    ]
+  }
+  priority 100
+}
+
+policy deny-sensitive {
+  tenant org1
+  effect deny
+  actions [
+    read
+    write
+    delete
+  ]
+  resources [
+    document:sensitive:*
+  ]
+  when {
+    subject.attrs.clearance != "high"
+  }
+  priority 50
+}
+
+policy owner-access {
+  tenant org1
+  effect allow
+  actions [
+    read
+    write
+    delete
+  ]
+  resources [
+    document:*
+  ]
+  when {
+    resource.owner_id == subject.id
+  }
+  priority 50
+}
 
 # HTTP route permissions use route:<METHOD>:<path-pattern> resources.
 # Middleware builds route resources as Type="route" and ID="<METHOD>:<actual-path>".
-policy route-owner-profile org1 allow GET route:GET:/users/* resource.owner_id=subject.id priority:60
-policy route-admin-api org1 allow GET,POST,PUT,DELETE route:* subject.roles@admin,superadmin priority:90
+policy route-owner-profile {
+  tenant org1
+  effect allow
+  actions [GET]
+  resources [
+    route:GET:/users/*
+  ]
+  when {
+    resource.owner_id == subject.id
+  }
+  priority 60
+}
 
-# Define roles: <id> <tenant> <name> <perms> [inherits:<roles>] [owner:<actions>]
-role admin org1 Administrator *:*
-role editor org1 Editor read:document:*,write:document:*,delete:document:*
-role viewer org1 Viewer read:*
-role owner org1 Owner read:* owner:read,write,delete,share
-role team-lead team1 "Team Lead" *:project:* inherits:editor
-role route-admin org1 "Route Administrator" GET:route:GET:/admin/*,POST:route:POST:/admin/*
+policy route-admin-api {
+  tenant org1
+  effect allow
+  actions [
+    GET
+    POST
+    PUT
+    DELETE
+  ]
+  resources [
+    route:*
+  ]
+  when {
+    subject.roles contains any [
+      admin
+      superadmin
+    ]
+  }
+  priority 90
+}
 
-# Define ACLs: <id> <resource> <subject> <actions> <effect> [expires:<time>]
-acl acl-1 document:123 user:alice read,write allow
-acl acl-2 document:* group:engineering read allow
-acl acl-3 document:sensitive:* user:bob * deny
-acl acl-route-public route:GET:/public/info guest GET allow
+# Define roles
+role admin {
+  tenant org1
+  name "Administrator"
+  permissions [
+    *:*
+  ]
+}
 
-# Define role memberships: <subject> <role>
-member user:alice admin
-member user:bob editor
-member user:charlie viewer
-member user:dave team-lead
-member user:erin route-admin
+role editor {
+  tenant org1
+  name "Editor"
+  permissions [
+    read:document:*
+    write:document:*
+    delete:document:*
+  ]
+}
 
-# Engine configuration: <key>=<value>...
-engine cache_ttl=5000 attr_ttl=10000 batch_size=128 flush_interval=50 workers=8
+role viewer {
+  tenant org1
+  name "Viewer"
+  permissions [
+    read:*
+  ]
+}
+
+role owner {
+  tenant org1
+  name "Owner"
+  permissions [
+    read:*
+  ]
+  owner_actions [
+    read
+    write
+    delete
+    share
+  ]
+}
+
+role team-lead {
+  tenant team1
+  name "Team Lead"
+  inherits [
+    editor
+  ]
+  permissions [
+    *:project:*
+  ]
+}
+
+role route-admin {
+  tenant org1
+  name "Route Administrator"
+  permissions [
+    GET:route:GET:/admin/*
+    POST:route:POST:/admin/*
+  ]
+}
+
+# Define ACLs
+acl acl-1 {
+  resource document:123
+  subject user:alice
+  actions [
+    read
+    write
+  ]
+  effect allow
+}
+
+acl acl-2 {
+  resource document:*
+  subject group:engineering
+  actions [read]
+  effect allow
+}
+
+acl acl-3 {
+  resource document:sensitive:*
+  subject user:bob
+  actions [*]
+  effect deny
+}
+
+acl acl-route-public {
+  resource route:GET:/public/info
+  subject guest
+  actions [GET]
+  effect allow
+}
+
+# Define role memberships
+members {
+  user:alice   [admin]
+  user:bob     [editor]
+  user:charlie [viewer]
+  user:dave    [team-lead]
+  user:erin    [route-admin]
+}
+
+# Engine configuration
+engine {
+  cache_ttl      5000
+  attr_ttl       10000
+  batch_size     128
+  flush_interval 50
+  workers        8
+}

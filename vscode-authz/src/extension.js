@@ -9,12 +9,13 @@ const language = { language: "authz", scheme: "file" };
 
 const directives = [
   ["include", "include \"./other.authz\"", "Include another .authz file"],
-  ["tenant", "tenant id \"Display Name\" [parent:parent_id]", "Define a tenant"],
-  ["policy", "policy id tenant allow actions resources condition [priority:n]", "Define an ABAC policy"],
-  ["role", "role id tenant \"Name\" perms [inherits:roles] [owner:actions]", "Define an RBAC role"],
-  ["acl", "acl id resource subject actions allow [expires:time]", "Define an ACL entry"],
-  ["member", "member subject role", "Assign a role to a subject"],
-  ["engine", "engine cache_ttl=ms attr_ttl=ms batch_size=n flush_interval=ms workers=n", "Configure engine runtime"],
+  ["tenant", "tenant id \"Display Name\" [parent:parent_id] or tenant id { name \"Display Name\" }", "Define a tenant"],
+  ["policy", "policy id tenant allow actions resources condition [priority:n] or policy id { ... }", "Define an ABAC policy"],
+  ["role", "role id tenant \"Name\" perms [inherits:roles] [owner:actions] or role id { ... }", "Define an RBAC role"],
+  ["acl", "acl id resource subject actions allow [expires:time] or acl id { ... }", "Define an ACL entry"],
+  ["member", "member subject role or member subject { roles [...] }", "Assign a role to a subject"],
+  ["members", "members { subject [roles] }", "Assign roles to many subjects"],
+  ["engine", "engine cache_ttl=ms attr_ttl=ms batch_size=n flush_interval=ms workers=n or engine { ... }", "Configure engine runtime"],
   ["user", "user id tenant email \"Name\" [status:status]", "Define a user"],
   ["group", "group id tenant \"Name\" [parent:group] [desc:text]", "Define a group"],
   ["scope", "scope id tenant \"Name\" [parent:scope] [desc:text]", "Define a scope"],
@@ -78,6 +79,15 @@ const conditionFunctions = [
   ["range(${1:subject.attrs.score},${2:1},${3:10})", "range(field, min, max)"]
 ];
 const conditionOperators = ["=", "==", "!=", ">=", "@", " IN ", " && ", " || ", " AND ", " OR "];
+const blockDirectiveNames = new Set(["tenant", "policy", "role", "acl", "member", "members", "engine"]);
+const blockFieldsByDirective = {
+  tenant: ["name", "parent"],
+  policy: ["tenant", "effect", "actions", "resources", "when", "priority"],
+  role: ["tenant", "name", "permissions", "inherits", "owner_actions"],
+  acl: ["resource", "subject", "actions", "effect", "expires"],
+  member: ["roles"],
+  engine: ["cache_ttl", "attr_ttl", "batch_size", "flush_interval", "workers"]
+};
 
 const directiveDocs = new Map(directives.map(([name, syntax, description]) => [name, { syntax, description }]));
 const functionDocs = new Map([
@@ -228,7 +238,7 @@ function activate(context) {
     async provideCompletionItems(document, position) {
       return provideCompletions(document, position);
     }
-  }, " ", ":", "=", ",", ".", "@"));
+  }, " ", ":", "=", ",", ".", "@", "[", "{"));
 
   context.subscriptions.push(vscode.languages.registerHoverProvider(language, {
     provideHover(document, position) {
@@ -346,6 +356,11 @@ async function provideCompletions(document, position) {
   const parsed = parseLine(text);
   const index = await buildWorkspaceIndex(document);
   const items = [];
+  const block = blockContextAt(document, position.line);
+
+  if (block && !isBlockHeader(parsed.tokens)) {
+    return blockCompletions(block.directive, parsed, text, index);
+  }
 
   if (parsed.tokens.length === 0 || (parsed.tokens.length === 1 && !text.endsWith(" "))) {
     for (const [name, syntax, description] of directives) {
@@ -420,6 +435,25 @@ async function provideCompletions(document, position) {
 
   items.push(...optionCompletions(directive, index));
   return items;
+}
+
+function blockCompletions(directive, parsed, text, index) {
+  const tokens = parsed.tokens;
+  if (tokens.length === 0 || (tokens.length === 1 && !text.endsWith(" "))) {
+    const fields = directive === "members" ? [] : (blockFieldsByDirective[directive] || []);
+    return fields.map((field) => completion(field, vscode.CompletionItemKind.Property, `Block field for ${directive}`));
+  }
+  const field = tokens[0];
+  if (field === "tenant") return index.tenants.map((id) => completion(id, vscode.CompletionItemKind.Reference, "Tenant ID"));
+  if (field === "effect") return effects.map((id) => completion(id, vscode.CompletionItemKind.EnumMember, "Effect"));
+  if (field === "actions" || field === "owner_actions") return actionCompletions(index);
+  if (field === "resources" || field === "resource") return resourceCompletions(index);
+  if (field === "subject") return subjectCompletions(index);
+  if (field === "permissions") return permissionCompletions();
+  if (field === "inherits" || field === "roles") return index.roles.map((id) => completion(id, vscode.CompletionItemKind.Reference, "Role ID"));
+  if (field === "when" || inBlockConditionContext(block, field)) return conditionCompletions();
+  if (directive === "members" && tokens.length <= 2) return index.roles.map((id) => completion(id, vscode.CompletionItemKind.Reference, "Role ID"));
+  return [];
 }
 
 function optionCompletions(directive, index) {
@@ -510,6 +544,11 @@ async function provideHover(document, position) {
   const tokenIndex = tokenInfo ? parsed.tokenInfos.indexOf(tokenInfo) : -1;
   const directive = parsed.tokens[0];
   const index = await buildWorkspaceIndex(document);
+  const block = blockContextAt(document, position.line);
+  if (block && !isBlockHeader(parsed.tokens)) {
+    const blockHover = hoverForBlockToken(document, block, parsed, tokenIndex, tokenInfo, position, index);
+    if (blockHover) return blockHover;
+  }
   const contextualHover = hoverForContext(directive, tokenIndex, tokenInfo, position, index);
   if (contextualHover) return contextualHover;
 
@@ -553,7 +592,12 @@ async function provideDefinition(document, position) {
   const directive = parsed.tokens[0];
   const tokenIndex = parsed.tokenInfos.indexOf(tokenInfo);
   const index = await buildWorkspaceIndex(document);
-  const keys = definitionKeysForToken(directive, tokenIndex, tokenInfo, position.character);
+  const block = blockContextAt(document, position.line);
+  const blockField = block ? blockFieldAt(document, block, position.line) : "";
+  const blockValueToken = block ? isBlockValueLine(blockField, parsed.tokens) : false;
+  const keys = block && !isBlockHeader(parsed.tokens)
+    ? definitionKeysForBlockToken(block.directive, blockField || parsed.tokens[0], tokenIndex, tokenInfo, position.character, blockValueToken)
+    : definitionKeysForToken(directive, tokenIndex, tokenInfo, position.character);
   const locations = [];
   for (const key of keys) {
     const found = index.definitions.get(key);
@@ -580,6 +624,36 @@ function hoverForSymbol(document, directive, tokenIndex, tokenInfo, position, in
     md.appendMarkdown(`**${directive}** \`${tokenInfo.value}\`\n\nDefines a ${directive.replace("_", " ")} entry.`);
     return new vscode.Hover(md);
   }
+  return undefined;
+}
+
+function hoverForBlockToken(document, block, parsed, tokenIndex, tokenInfo, position, index) {
+  if (!tokenInfo || tokenIndex < 0) return undefined;
+  const field = blockFieldAt(document, block, position.line) || parsed.tokens[0];
+  const valueToken = isBlockValueLine(field, parsed.tokens);
+  const token = tokenInfo.value;
+  if (tokenIndex === 0 && !valueToken) {
+    if ((blockFieldsByDirective[block.directive] || []).includes(field)) {
+      return explanationHover(`${block.directive} field \`${field}\``, "Block-form field.", "This field is normalized into the same config model as the compact inline DSL.", "");
+    }
+    if (block.directive === "members") return hoverForSubject(token, index);
+  }
+
+  const keys = definitionKeysForBlockToken(block.directive, field, tokenIndex, tokenInfo, position.character, valueToken);
+  const key = keys.find((candidate) => index.definitions.has(candidate));
+  if (key) {
+    const entry = entryForKey(index, key);
+    if (entry) return hoverForEntryBehavior(entry, index);
+    return explanationHover("Reference", `Reference to \`${token}\`.`, "Definition available in the indexed AuthZ config.", "Use Go to Definition (`F12`) or Cmd/Ctrl+Click.");
+  }
+
+  if (field === "effect") return hoverForEffect(token);
+  if (field === "actions" || field === "owner_actions") return hoverForAction(token);
+  if (field === "resources" || field === "resource") return hoverForResourcePattern(token, index);
+  if (field === "permissions") return hoverForPermission(token, index);
+  if (field === "subject") return hoverForSubject(token, index);
+  if (field === "when" || isConditionLike(token)) return hoverForCondition(token) || hoverForConditionField(token) || hoverForOperator(token);
+  if (block.directive === "members" && tokenIndex > 0) return hoverForRoleReference(cleanBlockValue(token), index);
   return undefined;
 }
 
@@ -1257,8 +1331,14 @@ function validateDocument(document) {
     if (tokens.length === 0) continue;
     const directive = tokens[0];
     const rangeEnd = Math.max(1, directive.length);
+    const startsBlock = isBlockHeader(tokens);
     if (!directiveDocs.has(directive)) {
       diagnostics.push(diag(lineNo, 0, rangeEnd, `Unknown AuthZ directive "${directive}".`, vscode.DiagnosticSeverity.Error));
+      continue;
+    }
+    if (startsBlock) {
+      checkDuplicateIds(document, diagnostics, lineNo, tokens, seen);
+      lineNo = collectDocumentBlock(document, lineNo).end;
       continue;
     }
     checkArity(document, diagnostics, lineNo, text, tokens);
@@ -1387,32 +1467,7 @@ function buildDocumentIndex(document) {
     definitions: new Map(),
     entries: []
   };
-  for (let i = 0; i < document.lineCount; i++) {
-    const parsed = parseLine(document.lineAt(i).text);
-    const tokens = parsed.tokens;
-    if (tokens.length < 2) continue;
-    const directive = tokens[0];
-    const id = unquote(tokens[1]);
-    const idInfo = parsed.tokenInfos[1];
-    const selectionRange = new vscode.Range(i, idInfo.start, i, idInfo.end);
-    const range = document.lineAt(i).range;
-
-    const details = parseEntryDetails(tokens);
-    if (directive === "tenant") addEntry(index, "tenants", "tenant", id, document.uri, range, selectionRange, [id], details);
-    if (directive === "policy") addEntry(index, "policies", "policy", id, document.uri, range, selectionRange, [id, `policy:${id}`], details);
-    if (directive === "role") addEntry(index, "roles", "role", id, document.uri, range, selectionRange, [id, `role:${id}`], details);
-    if (directive === "acl") addEntry(index, "acls", "acl", id, document.uri, range, selectionRange, [id, `acl:${id}`], details);
-    if (directive === "member" && tokens[2]) addEntry(index, "members", "member", `${tokens[1]} -> ${tokens[2]}`, document.uri, range, selectionRange, [], details);
-    if (directive === "user") addEntry(index, "users", "user", id, document.uri, range, selectionRange, [id, `user:${id}`], details);
-    if (directive === "group") addEntry(index, "groups", "group", id, document.uri, range, selectionRange, [id, `group:${id}`], details);
-    if (directive === "scope") addEntry(index, "scopes", "scope", id, document.uri, range, selectionRange, [id, `scope:${id}`], details);
-    if (directive === "service_account") addEntry(index, "serviceAccounts", "service_account", id, document.uri, range, selectionRange, [id, `service:${id}`, `service_account:${id}`], details);
-    if (directive === "invitation") addEntry(index, "invitations", "invitation", id, document.uri, range, selectionRange, [id, `invitation:${id}`], details);
-    if (directive === "api_key") addEntry(index, "apiKeys", "api_key", id, document.uri, range, selectionRange, [id, `api_key:${id}`], details);
-    if (directive === "boundary") addEntry(index, "boundaries", "boundary", id, document.uri, range, selectionRange, [id, `boundary:${id}`], details);
-
-    collectActionsAndResources(index, tokens);
-  }
+  indexLines(index, Array.from({ length: document.lineCount }, (_, i) => document.lineAt(i).text), document.uri, (line) => document.lineAt(line).range);
   index.tenants = unique(index.tenants);
   index.policies = unique(index.policies);
   index.roles = unique(index.roles);
@@ -1487,31 +1542,8 @@ function buildTextIndex(text, uri, seen) {
       }
       continue;
     }
-    if (tokens.length < 2) continue;
-    const directive = tokens[0];
-    const id = unquote(tokens[1]);
-    const idInfo = parsed.tokenInfos[1];
-    if (!idInfo) continue;
-    const selectionRange = new vscode.Range(i, idInfo.start, i, idInfo.end);
-    const range = new vscode.Range(i, 0, i, lines[i].length);
-
-    const details = parseEntryDetails(tokens);
-    if (directive === "tenant") addEntry(index, "tenants", "tenant", id, uri, range, selectionRange, [id], details);
-    if (directive === "policy") addEntry(index, "policies", "policy", id, uri, range, selectionRange, [id, `policy:${id}`], details);
-    if (directive === "role") addEntry(index, "roles", "role", id, uri, range, selectionRange, [id, `role:${id}`], details);
-    if (directive === "acl") addEntry(index, "acls", "acl", id, uri, range, selectionRange, [id, `acl:${id}`], details);
-    if (directive === "member" && tokens[2]) addEntry(index, "members", "member", `${tokens[1]} -> ${tokens[2]}`, uri, range, selectionRange, [], details);
-    if (directive === "user") addEntry(index, "users", "user", id, uri, range, selectionRange, [id, `user:${id}`], details);
-    if (directive === "group") addEntry(index, "groups", "group", id, uri, range, selectionRange, [id, `group:${id}`], details);
-    if (directive === "scope") addEntry(index, "scopes", "scope", id, uri, range, selectionRange, [id, `scope:${id}`], details);
-    if (directive === "service_account") addEntry(index, "serviceAccounts", "service_account", id, uri, range, selectionRange, [id, `service:${id}`, `service_account:${id}`], details);
-    if (directive === "invitation") addEntry(index, "invitations", "invitation", id, uri, range, selectionRange, [id, `invitation:${id}`], details);
-    if (directive === "api_key") addEntry(index, "apiKeys", "api_key", id, uri, range, selectionRange, [id, `api_key:${id}`], details);
-    if (directive === "boundary") addEntry(index, "boundaries", "boundary", id, uri, range, selectionRange, [id, `boundary:${id}`], details);
-
-    collectActionsAndResources(index, tokens);
-    collectReferences(index, uri, i, parsed);
   }
+  indexLines(index, lines, uri, (line) => new vscode.Range(line, 0, line, lines[line].length), true);
   return index;
 }
 
@@ -1552,6 +1584,245 @@ function finalizeIndex(index) {
   for (const key of ["tenants", "policies", "roles", "acls", "members", "users", "groups", "scopes", "serviceAccounts", "invitations", "apiKeys", "boundaries", "subjects", "actions", "resources"]) {
     index[key] = unique(index[key]);
   }
+}
+
+function indexLines(index, lines, uri, rangeForLine, collectRefs = false) {
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseLine(lines[i]);
+    const tokens = parsed.tokens;
+    if (tokens.length < 1) continue;
+    if (isBlockHeader(tokens)) {
+      const block = collectBlockLines(lines, i);
+      addBlockEntries(index, uri, lines, i, block.end, parsed, block.body, rangeForLine, collectRefs);
+      i = block.end;
+      continue;
+    }
+    addInlineEntry(index, uri, lines, i, parsed, rangeForLine, collectRefs);
+  }
+}
+
+function addInlineEntry(index, uri, lines, i, parsed, rangeForLine, collectRefs) {
+  const tokens = parsed.tokens;
+  if (tokens.length < 2) return;
+  const directive = tokens[0];
+  const id = unquote(tokens[1]);
+  const idInfo = parsed.tokenInfos[1];
+  if (!idInfo) return;
+  const selectionRange = new vscode.Range(i, idInfo.start, i, idInfo.end);
+  const range = rangeForLine(i);
+  addEntryForDirective(index, directive, id, uri, range, selectionRange, parseEntryDetails(tokens));
+  collectActionsAndResources(index, tokens);
+  if (collectRefs) collectReferences(index, uri, i, parsed);
+}
+
+function addBlockEntries(index, uri, lines, start, end, parsed, body, rangeForLine, collectRefs) {
+  const tokens = parsed.tokens;
+  const directive = tokens[0];
+  const range = new vscode.Range(start, 0, end, lines[end] ? lines[end].length : lines[start].length);
+  if (directive === "members") {
+    for (const row of body) {
+      const rowParsed = parseLine(lines[row.line]);
+      if (rowParsed.tokens.length < 2) continue;
+      const subject = rowParsed.tokens[0];
+      const roles = parseBlockValues(rowParsed.tokens.slice(1));
+      const subjectInfo = rowParsed.tokenInfos[0];
+      const selectionRange = new vscode.Range(row.line, subjectInfo.start, row.line, subjectInfo.end);
+      for (const role of roles) {
+        const details = { subject, role };
+        addEntry(index, "members", "member", `${subject} -> ${role}`, uri, rangeForLine(row.line), selectionRange, [], details);
+        if (collectRefs) {
+          index.references.push({ key: subject, uri, range: selectionRange, value: subject, prefix: "" });
+          addListReference(index, uri, row.line, lines[row.line], role, "role");
+        }
+      }
+    }
+    return;
+  }
+  if (tokens.length < 2) return;
+  const id = unquote(tokens[1]);
+  const idInfo = parsed.tokenInfos[1];
+  if (!idInfo) return;
+  const selectionRange = new vscode.Range(start, idInfo.start, start, idInfo.end);
+  const details = parseBlockEntryDetails(directive, body.map((item) => lines[item.line]));
+  if (directive === "member") {
+    details.subject = id;
+    for (const role of details.roles || []) {
+      addEntry(index, "members", "member", `${id} -> ${role}`, uri, range, selectionRange, [], { subject: id, role, roles: details.roles });
+      if (collectRefs) addListReference(index, uri, start, lines[start], id, "");
+    }
+    return;
+  }
+  addEntryForDirective(index, directive, id, uri, range, selectionRange, details);
+  collectBlockActionsAndResources(index, directive, details);
+  if (collectRefs) collectBlockReferences(index, uri, body, lines, directive, details);
+}
+
+function addEntryForDirective(index, directive, id, uri, range, selectionRange, details) {
+  if (directive === "tenant") addEntry(index, "tenants", "tenant", id, uri, range, selectionRange, [id], details);
+  if (directive === "policy") addEntry(index, "policies", "policy", id, uri, range, selectionRange, [id, `policy:${id}`], details);
+  if (directive === "role") addEntry(index, "roles", "role", id, uri, range, selectionRange, [id, `role:${id}`], details);
+  if (directive === "acl") addEntry(index, "acls", "acl", id, uri, range, selectionRange, [id, `acl:${id}`], details);
+  if (directive === "member" && details.role) addEntry(index, "members", "member", `${details.subject} -> ${details.role}`, uri, range, selectionRange, [], details);
+  if (directive === "user") addEntry(index, "users", "user", id, uri, range, selectionRange, [id, `user:${id}`], details);
+  if (directive === "group") addEntry(index, "groups", "group", id, uri, range, selectionRange, [id, `group:${id}`], details);
+  if (directive === "scope") addEntry(index, "scopes", "scope", id, uri, range, selectionRange, [id, `scope:${id}`], details);
+  if (directive === "service_account") addEntry(index, "serviceAccounts", "service_account", id, uri, range, selectionRange, [id, `service:${id}`, `service_account:${id}`], details);
+  if (directive === "invitation") addEntry(index, "invitations", "invitation", id, uri, range, selectionRange, [id, `invitation:${id}`], details);
+  if (directive === "api_key") addEntry(index, "apiKeys", "api_key", id, uri, range, selectionRange, [id, `api_key:${id}`], details);
+  if (directive === "boundary") addEntry(index, "boundaries", "boundary", id, uri, range, selectionRange, [id, `boundary:${id}`], details);
+}
+
+function collectBlockLines(lines, start) {
+  let depth = braceDelta(lines[start]);
+  const body = [];
+  let end = start;
+  for (let i = start + 1; i < lines.length; i++) {
+    const oldDepth = depth;
+    depth += braceDelta(lines[i]);
+    const parsed = parseLine(lines[i]);
+    if (!(oldDepth === 1 && depth === 0 && parsed.tokens.length === 1 && parsed.tokens[0] === "}")) {
+      body.push({ line: i });
+    }
+    end = i;
+    if (depth <= 0) break;
+  }
+  return { body, end };
+}
+
+function parseBlockEntryDetails(directive, bodyLines) {
+  const fields = parseBlockFields(bodyLines);
+  if (directive === "tenant") return { name: first(fields.values.name), parent: first(fields.values.parent) || "" };
+  if (directive === "policy") {
+    return {
+      tenant: first(fields.values.tenant),
+      effect: first(fields.values.effect),
+      actions: fields.values.actions || [],
+      resources: fields.values.resources || [],
+      condition: fields.blocks.when || fields.blocks.condition || first(fields.values.condition) || "true",
+      priority: first(fields.values.priority) || "0"
+    };
+  }
+  if (directive === "role") {
+    return {
+      tenant: first(fields.values.tenant),
+      name: first(fields.values.name),
+      permissions: fields.values.permissions || [],
+      inherits: fields.values.inherits || [],
+      owner: fields.values.owner_actions || []
+    };
+  }
+  if (directive === "acl") {
+    return {
+      resource: first(fields.values.resource),
+      subject: first(fields.values.subject),
+      actions: fields.values.actions || [],
+      effect: first(fields.values.effect),
+      expires: first(fields.values.expires) || ""
+    };
+  }
+  if (directive === "member") {
+    const roles = fields.values.roles || [];
+    return { subject: "", role: roles[0] || "", roles };
+  }
+  return { tenant: first(fields.values.tenant), options: fields.values };
+}
+
+function parseBlockFields(lines) {
+  const fields = { values: {}, blocks: {} };
+  for (let i = 0; i < lines.length; i++) {
+    const parsed = parseLine(lines[i]);
+    const tokens = parsed.tokens;
+    if (tokens.length === 0 || tokens[0] === "}") continue;
+    const key = tokens[0];
+    if (tokens[1] === "{") {
+      const nested = collectBlockLines(lines, i);
+      const collected = nested.body.flatMap((item) => parseLine(lines[item.line]).tokens);
+      fields.blocks[key] = collected.join(" ");
+      i = nested.end;
+      continue;
+    }
+    if (tokens[1] === "[") {
+      const collected = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const row = parseLine(lines[j]).tokens;
+        if (row.length === 1 && row[0] === "]") {
+          i = j;
+          break;
+        }
+        collected.push(...row.map((part) => cleanBlockValue(part)).filter(Boolean));
+      }
+      fields.values[key] = (fields.values[key] || []).concat(collected);
+      continue;
+    }
+    fields.values[key] = (fields.values[key] || []).concat(parseBlockValues(tokens.slice(1)));
+  }
+  return fields;
+}
+
+function parseBlockValues(tokens) {
+  if (!tokens || tokens.length === 0) return [];
+  if (tokens.length === 1 && !tokens[0].startsWith("[") && !tokens[0].startsWith("{")) return [unquote(tokens[0])].filter(Boolean);
+  const joined = tokens.join(" ").replace(/^\[/, "").replace(/\]$/, "").replace(/,/g, " ");
+  return parseLine(joined).tokens.map((item) => cleanBlockValue(item)).filter(Boolean);
+}
+
+function cleanBlockValue(value) {
+  return unquote(String(value || "").replace(/^\[/, "").replace(/\]$/, "").replace(/,$/, ""));
+}
+
+function first(values) {
+  return values && values.length ? values[0] : "";
+}
+
+function collectBlockActionsAndResources(index, directive, details) {
+  if (directive === "policy") {
+    for (const action of details.actions || []) index.actions.push(action);
+    for (const resource of details.resources || []) index.resources.push(resource);
+  }
+  if (directive === "acl") {
+    if (details.resource) index.resources.push(details.resource);
+    for (const action of details.actions || []) index.actions.push(action);
+  }
+  if (directive === "role") {
+    for (const permission of details.permissions || []) collectPermissions(index, permission);
+  }
+}
+
+function collectBlockReferences(index, uri, body, lines, directive, details) {
+  let activeList = "";
+  for (const item of body) {
+    const parsed = parseLine(lines[item.line]);
+    if (parsed.tokens.length === 0) continue;
+    if (parsed.tokens.length === 1 && parsed.tokens[0] === "]") {
+      activeList = "";
+      continue;
+    }
+    const startsList = parsed.tokens[1] === "[";
+    const field = activeList || parsed.tokens[0];
+    const firstValueIndex = activeList ? 0 : 1;
+    for (let i = firstValueIndex; i < parsed.tokens.length; i++) {
+      const tokenInfo = parsed.tokenInfos[i];
+      if (!tokenInfo) continue;
+      const keys = definitionKeysForBlockToken(directive, field, i, tokenInfo, tokenInfo.start, Boolean(activeList));
+      for (const key of keys) {
+        index.references.push({
+          key,
+          uri,
+          range: new vscode.Range(item.line, tokenInfo.start, item.line, tokenInfo.end),
+          value: tokenInfo.value,
+          prefix: ""
+        });
+      }
+    }
+    if (startsList) activeList = parsed.tokens[0];
+  }
+}
+
+function addListReference(index, uri, line, text, value, prefix) {
+  const start = Math.max(0, text.indexOf(value));
+  const range = new vscode.Range(line, start, line, start + value.length);
+  index.references.push({ key: value, uri, range, value, prefix: "" });
+  if (prefix) index.references.push({ key: `${prefix}:${value}`, uri, range, value, prefix: "" });
 }
 
 function addEntry(index, collection, directive, id, uri, range, selectionRange, keys, details = {}) {
@@ -1693,7 +1964,12 @@ async function referenceTarget(document, position) {
   if (!tokenInfo || parsed.tokens.length === 0) return undefined;
   const tokenIndex = parsed.tokenInfos.indexOf(tokenInfo);
   const directive = parsed.tokens[0];
-  const keys = definitionKeysForToken(directive, tokenIndex, tokenInfo, position.character);
+  const block = blockContextAt(document, position.line);
+  const blockField = block ? blockFieldAt(document, block, position.line) : "";
+  const blockValueToken = block ? isBlockValueLine(blockField, parsed.tokens) : false;
+  const keys = block && !isBlockHeader(parsed.tokens)
+    ? definitionKeysForBlockToken(block.directive, blockField || parsed.tokens[0], tokenIndex, tokenInfo, position.character, blockValueToken)
+    : definitionKeysForToken(directive, tokenIndex, tokenInfo, position.character);
   const isDefinition = tokenIndex === 1 && isDefinitionDirective(directive);
   const defKeys = isDefinition ? definitionKeysForDefinition(directive, tokenInfo.value) : keys;
   const range = tokenInfo.range || new vscode.Range(position.line, tokenInfo.start, position.line, tokenInfo.end);
@@ -1797,6 +2073,91 @@ function parseLine(line) {
   return { tokens, tokenInfos };
 }
 
+function isBlockHeader(tokens) {
+  return tokens.length >= 2 && tokens[tokens.length - 1] === "{" && blockDirectiveNames.has(tokens[0]);
+}
+
+function braceDelta(line) {
+  let quote = "";
+  let delta = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (!quote && ch === "#") break;
+    if ((ch === "\"" || ch === "'" || ch === "`") && (!quote || quote === ch)) {
+      quote = quote ? "" : ch;
+      continue;
+    }
+    if (quote) continue;
+    if (ch === "{") delta++;
+    if (ch === "}") delta--;
+  }
+  return delta;
+}
+
+function blockContextAt(document, lineNo) {
+  let depth = 0;
+  let active;
+  for (let i = 0; i < lineNo; i++) {
+    const parsed = parseLine(document.lineAt(i).text);
+    const delta = braceDelta(document.lineAt(i).text);
+    if (isBlockHeader(parsed.tokens)) {
+      active = { directive: parsed.tokens[0], start: i };
+    }
+    depth += delta;
+    if (depth <= 0) active = undefined;
+  }
+  return active;
+}
+
+function blockFieldAt(document, block, lineNo) {
+  if (!block) return "";
+  let activeList = "";
+  let activeNested = "";
+  for (let i = block.start + 1; i <= lineNo; i++) {
+    const parsed = parseLine(document.lineAt(i).text);
+    if (parsed.tokens.length === 0) continue;
+    if (parsed.tokens.length === 1 && parsed.tokens[0] === "]") {
+      activeList = "";
+      continue;
+    }
+    if (parsed.tokens.length === 1 && parsed.tokens[0] === "}") {
+      activeNested = "";
+      continue;
+    }
+    if (parsed.tokens[1] === "[") {
+      activeList = parsed.tokens[0];
+      if (i === lineNo) return activeList;
+      continue;
+    }
+    if (parsed.tokens[1] === "{") {
+      activeNested = parsed.tokens[0];
+      if (i === lineNo) return activeNested;
+      continue;
+    }
+    if (i === lineNo) return activeList || activeNested || parsed.tokens[0] || "";
+  }
+  return "";
+}
+
+function isBlockValueLine(field, tokens) {
+  return Boolean(field) && tokens.length > 0 && tokens[0] !== field;
+}
+
+function collectDocumentBlock(document, start) {
+  let depth = braceDelta(document.lineAt(start).text);
+  let end = start;
+  for (let i = start + 1; i < document.lineCount; i++) {
+    depth += braceDelta(document.lineAt(i).text);
+    end = i;
+    if (depth <= 0) break;
+  }
+  return { end };
+}
+
+function inBlockConditionContext(block, field) {
+  return block && block.directive === "policy" && (field === "when" || field === "condition");
+}
+
 function inConditionContext(text, parsed) {
   const directive = parsed.tokens[0];
   return directive === "policy" && parsed.tokens.length >= 7 && !/^.*\spriority:/.test(text);
@@ -1829,6 +2190,24 @@ function definitionKeysForToken(directive, tokenIndex, tokenInfo, character) {
   if (["user", "group", "scope", "service_account", "invitation", "api_key", "boundary"].includes(directive) && tokenIndex === 2) return [value];
   if (directive === "api_key" && tokenIndex === 3) return [value, `user:${value}`];
   if (directive === "invitation" && tokenIndex === 4) return roleListKeys(listItemAt(tokenInfo, character));
+  return [];
+}
+
+function definitionKeysForBlockToken(blockDirective, field, tokenIndex, tokenInfo, character, valueToken = false) {
+  if (!tokenInfo) return [];
+  const value = cleanBlockValue(listItemAt(tokenInfo, character));
+  if (!value || value === "[" || value === "]" || value === "{") return [];
+  if (blockDirective === "members") {
+    if (tokenIndex === 0) return [value];
+    return roleListKeys(value);
+  }
+  if (tokenIndex === 0 && !valueToken) return [];
+  if (field === "tenant") return [value];
+  if (field === "parent" && blockDirective === "tenant") return [value];
+  if (field === "parent" && blockDirective === "group") return [value, `group:${value}`];
+  if (field === "parent" && blockDirective === "scope") return [value, `scope:${value}`];
+  if (field === "inherits" || field === "roles") return roleListKeys(value);
+  if (field === "subject") return [value];
   return [];
 }
 

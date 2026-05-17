@@ -26,6 +26,23 @@
     "directiveLines": {
       "patterns": [
         {
+          "name": "meta.directive.block.authz",
+          "match": "^(\\s*)(tenant|policy|role|acl|member)(\\s+)(\"[^\"]*\"|'[^']*'|`[^`]*`|[^\\s#{}]+)(\\s*)(\\{)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "entity.name.definition.authz" },
+            "6": { "name": "punctuation.section.block.begin.authz" }
+          }
+        },
+        {
+          "name": "meta.directive.members-block.authz",
+          "match": "^(\\s*)(members|engine)(\\s*)(\\{)",
+          "captures": {
+            "2": { "name": "keyword.control.directive.authz" },
+            "4": { "name": "punctuation.section.block.begin.authz" }
+          }
+        },
+        {
           "name": "meta.directive.policy.authz",
           "match": "^(\\s*)(policy)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)(allow|deny)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)(\\s+)([^\\s#]+)",
           "captures": {
@@ -105,7 +122,11 @@
         },
         {
           "name": "keyword.control.directive.authz",
-          "match": "^\\s*\\b(include|tenant|policy|role|acl|member|engine|user|group|scope|service_account|invitation|api_key|boundary)\\b"
+          "match": "^\\s*\\b(include|tenant|policy|role|acl|member|members|engine|user|group|scope|service_account|invitation|api_key|boundary)\\b"
+        },
+        {
+          "name": "support.type.block-field.authz",
+          "match": "^\\s*\\b(name|parent|tenant|effect|actions|resources|when|condition|priority|permissions|inherits|owner_actions|resource|subject|roles|cache_ttl|attr_ttl|batch_size|flush_interval|workers|expires)\\b"
         }
       ]
     },
@@ -162,7 +183,7 @@
         },
         {
           "name": "keyword.operator.logical.authz",
-          "match": "(?<![A-Za-z0-9_-])(AND|OR|IN)(?![A-Za-z0-9_-])|&&|\\|\\|"
+          "match": "(?<![A-Za-z0-9_-])(AND|OR|IN|and|or|in|contains|any|has_any|has)(?![A-Za-z0-9_-])|&&|\\|\\|"
         },
         {
           "name": "keyword.operator.comparison.authz",
@@ -231,6 +252,10 @@
         {
           "name": "punctuation.separator.key-value.authz",
           "match": ":|="
+        },
+        {
+          "name": "punctuation.section.block.authz",
+          "match": "[{}\\[\\]]"
         }
       ]
     }

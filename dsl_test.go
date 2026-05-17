@@ -98,6 +98,134 @@ member user:erin route-admin
 	}
 }
 
+func TestDSLBlockSyntax(t *testing.T) {
+	dsl := `
+tenant org1 {
+  name "Engineering Org"
+}
+tenant team1 {
+  name "Backend Team"
+  parent org1
+}
+
+policy allow-admin {
+  tenant org1
+  effect allow
+  actions [
+    read
+    write
+    delete
+    share
+  ]
+  resources [
+    document:*
+    project:*
+    route:*
+  ]
+  when {
+    subject.roles contains any [
+      admin
+      superadmin
+    ]
+  }
+  priority 100
+}
+
+policy owner-access {
+  tenant org1
+  effect allow
+  actions [read, write, delete]
+  resources [document:*]
+  when {
+    resource.owner_id == subject.id
+  }
+  priority 50
+}
+
+role editor {
+  tenant org1
+  name "Editor"
+  permissions [
+    read:document:*
+    write:document:*
+    delete:document:*
+  ]
+}
+
+role owner {
+  tenant org1
+  name "Owner"
+  permissions {
+    read:*
+  }
+  owner_actions [
+    read
+    write
+    delete
+    share
+  ]
+}
+
+acl acl-route-public {
+  resource route:GET:/public/info
+  subject guest
+  actions [GET]
+  effect allow
+}
+
+member user:alice {
+  roles [
+    editor
+    owner
+  ]
+}
+
+members {
+  user:bob [editor]
+  user:charlie [owner]
+}
+
+engine {
+  cache_ttl 5000
+  attr_ttl 10000
+  batch_size 128
+  flush_interval 50
+  workers 8
+}
+`
+	cfg, err := authz.NewDSLParser().Parse([]byte(dsl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Tenants) != 2 || cfg.Hierarchy["team1"] != "org1" {
+		t.Fatalf("tenant blocks did not parse hierarchy: %#v", cfg.Tenants)
+	}
+	if len(cfg.Policies) != 2 {
+		t.Fatalf("expected 2 policies, got %d", len(cfg.Policies))
+	}
+	if got := len(cfg.Policies[0].Actions); got != 4 {
+		t.Fatalf("expected 4 policy actions, got %d", got)
+	}
+	if _, ok := cfg.Policies[0].Condition.(*authz.InExpr); !ok {
+		t.Fatalf("expected contains any condition to parse as InExpr, got %T", cfg.Policies[0].Condition)
+	}
+	if _, ok := cfg.Policies[1].Condition.(*authz.EqExpr); !ok {
+		t.Fatalf("expected equality condition, got %T", cfg.Policies[1].Condition)
+	}
+	if len(cfg.Roles) != 2 || len(cfg.Roles[1].OwnerAllowedActions) != 4 {
+		t.Fatalf("role blocks did not parse owner actions: %#v", cfg.Roles)
+	}
+	if len(cfg.ACLs) != 1 || cfg.ACLs[0].ResourceID != "route:GET:/public/info" {
+		t.Fatalf("acl block did not parse route resource: %#v", cfg.ACLs)
+	}
+	if len(cfg.Memberships) != 4 {
+		t.Fatalf("expected 4 memberships, got %d", len(cfg.Memberships))
+	}
+	if cfg.Engine.DecisionCacheTTL != 5000 || cfg.Engine.AttributeCacheTTL != 10000 || cfg.Engine.AuditBatchSize != 128 || cfg.Engine.AuditFlushInterval != 50 || cfg.Engine.BatchWorkerCount != 8 {
+		t.Fatalf("engine block did not parse: %#v", cfg.Engine)
+	}
+}
+
 func TestDSLStrictParserRejectsInvalidInput(t *testing.T) {
 	tests := []struct {
 		name string

@@ -439,96 +439,403 @@ func (p *DSLParser) Parse(data []byte) (*Config, error) {
 	p.actionIndex = 0
 	p.stringIndex = 0
 	p.permIndex = 0
-	start := 0
-	for i := 0; i <= len(data); i++ {
-		if i == len(data) || data[i] == '\n' {
-			p.line++
-			line := data[start:i]
-			start = i + 1
+	lines := bytes.Split(data, []byte{'\n'})
+	for i := 0; i < len(lines); i++ {
+		p.line = i + 1
+		line := trimDSLLine(lines[i])
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
 
-			for len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
-				line = line[1:]
-			}
-			for len(line) > 0 && (line[len(line)-1] == ' ' || line[len(line)-1] == '\t' || line[len(line)-1] == '\r') {
-				line = line[:len(line)-1]
-			}
+		parts, err := p.splitLineBytes(line)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", p.line, err)
+		}
+		if len(parts) == 0 {
+			continue
+		}
 
-			if len(line) == 0 || line[0] == '#' {
-				continue
-			}
-
-			parts, err := p.splitLineBytes(line)
+		if isTopLevelBlockStart(parts) {
+			header := append([]string(nil), parts[:len(parts)-1]...)
+			body, next, err := p.collectBlock(lines, i)
 			if err != nil {
+				return nil, err
+			}
+			if err := p.parseDirectiveBlock(cfg, header, body); err != nil {
 				return nil, fmt.Errorf("line %d: %w", p.line, err)
 			}
-			if len(parts) == 0 {
-				continue
-			}
+			i = next
+			continue
+		}
 
-			switch parts[0] {
-			case "include":
-				if err := p.parseInclude(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "tenant":
-				if err := p.parseTenant(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "policy":
-				if err := p.parsePolicy(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "role":
-				if err := p.parseRole(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "acl":
-				if err := p.parseACL(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "member":
-				if err := p.parseMember(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "engine":
-				if err := p.parseEngine(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "user":
-				if err := p.parseUser(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "group":
-				if err := p.parseGroup(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "scope":
-				if err := p.parseScope(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "service_account":
-				if err := p.parseServiceAccount(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "invitation":
-				if err := p.parseInvitation(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "api_key":
-				if err := p.parseAPIKey(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			case "boundary":
-				if err := p.parseBoundary(cfg, parts[1:]); err != nil {
-					return nil, fmt.Errorf("line %d: %w", p.line, err)
-				}
-			default:
-				return nil, fmt.Errorf("line %d: unknown directive: %s", p.line, parts[0])
-			}
+		if err := p.parseDirective(cfg, parts); err != nil {
+			return nil, fmt.Errorf("line %d: %w", p.line, err)
 		}
 	}
 
 	return cfg, nil
+}
+
+func trimDSLLine(line []byte) []byte {
+	for len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
+		line = line[1:]
+	}
+	for len(line) > 0 && (line[len(line)-1] == ' ' || line[len(line)-1] == '\t' || line[len(line)-1] == '\r') {
+		line = line[:len(line)-1]
+	}
+	return line
+}
+
+func isTopLevelBlockStart(parts []string) bool {
+	return len(parts) >= 2 && parts[len(parts)-1] == "{"
+}
+
+func (p *DSLParser) parseDirective(cfg *Config, parts []string) error {
+	switch parts[0] {
+	case "include":
+		return p.parseInclude(cfg, parts[1:])
+	case "tenant":
+		return p.parseTenant(cfg, parts[1:])
+	case "policy":
+		return p.parsePolicy(cfg, parts[1:])
+	case "role":
+		return p.parseRole(cfg, parts[1:])
+	case "acl":
+		return p.parseACL(cfg, parts[1:])
+	case "member":
+		return p.parseMember(cfg, parts[1:])
+	case "engine":
+		return p.parseEngine(cfg, parts[1:])
+	case "user":
+		return p.parseUser(cfg, parts[1:])
+	case "group":
+		return p.parseGroup(cfg, parts[1:])
+	case "scope":
+		return p.parseScope(cfg, parts[1:])
+	case "service_account":
+		return p.parseServiceAccount(cfg, parts[1:])
+	case "invitation":
+		return p.parseInvitation(cfg, parts[1:])
+	case "api_key":
+		return p.parseAPIKey(cfg, parts[1:])
+	case "boundary":
+		return p.parseBoundary(cfg, parts[1:])
+	default:
+		return fmt.Errorf("unknown directive: %s", parts[0])
+	}
+}
+
+type dslBlockLine struct {
+	line int
+	text []byte
+}
+
+func (p *DSLParser) collectBlock(lines [][]byte, start int) ([]dslBlockLine, int, error) {
+	depth := dslBraceDelta(lines[start])
+	if depth <= 0 {
+		return nil, start, fmt.Errorf("line %d: malformed block start", start+1)
+	}
+	body := make([]dslBlockLine, 0, 8)
+	for i := start + 1; i < len(lines); i++ {
+		line := trimDSLLine(lines[i])
+		oldDepth := depth
+		depth += dslBraceDelta(line)
+		if oldDepth == 1 && depth == 0 && isDSLClosingBraceLine(line) {
+			return body, i, nil
+		}
+		body = append(body, dslBlockLine{line: i + 1, text: line})
+		if depth < 0 {
+			return nil, i, fmt.Errorf("line %d: unexpected block close", i+1)
+		}
+	}
+	return nil, start, fmt.Errorf("line %d: unterminated block", start+1)
+}
+
+func dslBraceDelta(line []byte) int {
+	var quote byte
+	delta := 0
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if ch == '#' && quote == 0 {
+			break
+		}
+		if (ch == '"' || ch == '\'' || ch == '`') && quote == 0 {
+			quote = ch
+			continue
+		}
+		if ch == quote {
+			quote = 0
+			continue
+		}
+		if quote != 0 {
+			continue
+		}
+		switch ch {
+		case '{':
+			delta++
+		case '}':
+			delta--
+		}
+	}
+	return delta
+}
+
+func isDSLClosingBraceLine(line []byte) bool {
+	parts, err := splitLineBytes(line)
+	return err == nil && len(parts) == 1 && parts[0] == "}"
+}
+
+func (p *DSLParser) parseDirectiveBlock(cfg *Config, header []string, body []dslBlockLine) error {
+	if len(header) == 0 {
+		return fmt.Errorf("missing block directive")
+	}
+	switch header[0] {
+	case "tenant":
+		return p.parseTenantBlock(cfg, header[1:], body)
+	case "policy":
+		return p.parsePolicyBlock(cfg, header[1:], body)
+	case "role":
+		return p.parseRoleBlock(cfg, header[1:], body)
+	case "acl":
+		return p.parseACLBlock(cfg, header[1:], body)
+	case "member":
+		return p.parseMemberBlock(cfg, header[1:], body)
+	case "members":
+		if len(header) != 1 {
+			return fmt.Errorf("members block does not take an id")
+		}
+		return p.parseMembersBlock(cfg, body)
+	case "engine":
+		if len(header) != 1 {
+			return fmt.Errorf("engine block does not take an id")
+		}
+		return p.parseEngineBlock(cfg, body)
+	default:
+		return fmt.Errorf("unknown block directive: %s", header[0])
+	}
+}
+
+func (p *DSLParser) parseTenantBlock(cfg *Config, header []string, body []dslBlockLine) error {
+	if len(header) != 1 {
+		return fmt.Errorf("tenant block requires: tenant <id> { ... }")
+	}
+	fields, err := p.parseBlockFields(body)
+	if err != nil {
+		return err
+	}
+	t := TenantConfig{ID: parseQuotedString(header[0]), Name: fields.one("name")}
+	if t.Name == "" {
+		t.Name = t.ID
+	}
+	t.Parent = fields.one("parent")
+	if t.Parent != "" {
+		if cfg.Hierarchy == nil {
+			cfg.Hierarchy = make(map[string]string, 4)
+		}
+		cfg.Hierarchy[t.ID] = t.Parent
+	}
+	cfg.Tenants = append(cfg.Tenants, t)
+	return nil
+}
+
+func (p *DSLParser) parsePolicyBlock(cfg *Config, header []string, body []dslBlockLine) error {
+	if len(header) != 1 {
+		return fmt.Errorf("policy block requires: policy <id> { ... }")
+	}
+	fields, err := p.parseBlockFields(body)
+	if err != nil {
+		return err
+	}
+	effect := Effect(fields.one("effect"))
+	if p.strict && !validEffect(effect) {
+		return fmt.Errorf("invalid policy effect: %s", effect)
+	}
+	actions, err := p.actionsFromValues(fields.list("actions"))
+	if err != nil {
+		return fmt.Errorf("invalid policy actions: %w", err)
+	}
+	resources := fields.list("resources")
+	if p.strict && len(resources) == 0 {
+		return fmt.Errorf("invalid policy resources: empty list")
+	}
+	conditionText := fields.blockText("when")
+	if conditionText == "" {
+		conditionText = fields.one("condition")
+	}
+	condition, err := p.parseCondition(conditionText)
+	if err != nil {
+		return fmt.Errorf("invalid policy condition: %w", err)
+	}
+
+	pol := p.nextPolicy()
+	*pol = Policy{
+		ID:        parseQuotedString(header[0]),
+		TenantID:  fields.one("tenant"),
+		Effect:    effect,
+		Actions:   actions,
+		Resources: resources,
+		Condition: condition,
+		Enabled:   true,
+		CreatedAt: p.now,
+		UpdatedAt: p.now,
+	}
+	if priority := fields.one("priority"); priority != "" {
+		n, err := strconv.Atoi(priority)
+		if err != nil {
+			if p.strict {
+				return fmt.Errorf("invalid priority: %s", priority)
+			}
+		} else {
+			pol.Priority = n
+		}
+	}
+	cfg.Policies = append(cfg.Policies, pol)
+	return nil
+}
+
+func (p *DSLParser) parseRoleBlock(cfg *Config, header []string, body []dslBlockLine) error {
+	if len(header) != 1 {
+		return fmt.Errorf("role block requires: role <id> { ... }")
+	}
+	fields, err := p.parseBlockFields(body)
+	if err != nil {
+		return err
+	}
+	perms, err := p.permissionsFromValues(fields.list("permissions"))
+	if err != nil {
+		return fmt.Errorf("invalid role permissions: %w", err)
+	}
+	role := p.nextRole()
+	*role = Role{
+		ID:                  parseQuotedString(header[0]),
+		TenantID:            fields.one("tenant"),
+		Name:                fields.one("name"),
+		Permissions:         perms,
+		OwnerAllowedActions: []Action{},
+		Inherits:            fields.list("inherits"),
+		CreatedAt:           p.now,
+	}
+	if role.Name == "" {
+		role.Name = role.ID
+	}
+	if fields.has("owner_actions") {
+		ownerActions, err := p.actionsFromValues(fields.list("owner_actions"))
+		if err != nil {
+			return fmt.Errorf("invalid owner_actions: %w", err)
+		}
+		role.OwnerAllowedActions = ownerActions
+	}
+	cfg.Roles = append(cfg.Roles, role)
+	return nil
+}
+
+func (p *DSLParser) parseACLBlock(cfg *Config, header []string, body []dslBlockLine) error {
+	if len(header) != 1 {
+		return fmt.Errorf("acl block requires: acl <id> { ... }")
+	}
+	fields, err := p.parseBlockFields(body)
+	if err != nil {
+		return err
+	}
+	effect := Effect(fields.one("effect"))
+	if p.strict && !validEffect(effect) {
+		return fmt.Errorf("invalid acl effect: %s", effect)
+	}
+	actions, err := p.actionsFromValues(fields.list("actions"))
+	if err != nil {
+		return fmt.Errorf("invalid acl actions: %w", err)
+	}
+	acl := p.nextACL()
+	*acl = ACL{
+		ID:         parseQuotedString(header[0]),
+		ResourceID: fields.one("resource"),
+		SubjectID:  fields.one("subject"),
+		TenantID:   fields.one("tenant"),
+		Actions:    actions,
+		Effect:     effect,
+		CreatedAt:  p.now,
+	}
+	if expiresText := fields.one("expires"); expiresText != "" {
+		expires, err := time.Parse(time.RFC3339, expiresText)
+		if err != nil {
+			if p.strict {
+				return fmt.Errorf("invalid expires timestamp: %s", expiresText)
+			}
+		} else {
+			acl.ExpiresAt = expires
+		}
+	}
+	cfg.ACLs = append(cfg.ACLs, acl)
+	return nil
+}
+
+func (p *DSLParser) parseMemberBlock(cfg *Config, header []string, body []dslBlockLine) error {
+	if len(header) != 1 {
+		return fmt.Errorf("member block requires: member <subject> { ... }")
+	}
+	fields, err := p.parseBlockFields(body)
+	if err != nil {
+		return err
+	}
+	for _, role := range fields.list("roles") {
+		cfg.Memberships = append(cfg.Memberships, RoleMembership{SubjectID: parseQuotedString(header[0]), RoleID: role})
+	}
+	return nil
+}
+
+func (p *DSLParser) parseMembersBlock(cfg *Config, body []dslBlockLine) error {
+	for _, line := range body {
+		text := trimDSLLine(line.text)
+		if len(text) == 0 || text[0] == '#' {
+			continue
+		}
+		parts, err := p.splitLineBytes(text)
+		if err != nil {
+			return fmt.Errorf("line %d: %w", line.line, err)
+		}
+		if len(parts) < 2 {
+			return fmt.Errorf("line %d: member row requires: <subject> [roles]", line.line)
+		}
+		subjectID := parseQuotedString(parts[0])
+		roles, err := p.parseBlockListTokens(parts[1:])
+		if err != nil {
+			return fmt.Errorf("line %d: invalid member roles: %w", line.line, err)
+		}
+		for _, role := range roles {
+			cfg.Memberships = append(cfg.Memberships, RoleMembership{SubjectID: subjectID, RoleID: role})
+		}
+	}
+	return nil
+}
+
+func (p *DSLParser) parseEngineBlock(cfg *Config, body []dslBlockLine) error {
+	fields, err := p.parseBlockFields(body)
+	if err != nil {
+		return err
+	}
+	for _, key := range []string{"cache_ttl", "attr_ttl", "batch_size", "flush_interval", "workers"} {
+		val := fields.one(key)
+		if val == "" {
+			continue
+		}
+		var parseErr error
+		switch key {
+		case "cache_ttl":
+			cfg.Engine.DecisionCacheTTL, parseErr = strconv.ParseInt(val, 10, 64)
+		case "attr_ttl":
+			cfg.Engine.AttributeCacheTTL, parseErr = strconv.ParseInt(val, 10, 64)
+		case "batch_size":
+			cfg.Engine.AuditBatchSize, parseErr = strconv.Atoi(val)
+		case "flush_interval":
+			cfg.Engine.AuditFlushInterval, parseErr = strconv.ParseInt(val, 10, 64)
+		case "workers":
+			cfg.Engine.BatchWorkerCount, parseErr = strconv.Atoi(val)
+		}
+		if parseErr != nil && p.strict {
+			return fmt.Errorf("invalid engine value for %s: %s", key, val)
+		}
+	}
+	return nil
 }
 
 type dslDirectiveCounts struct {
@@ -1211,6 +1518,238 @@ func (p *DSLParser) parseBoundary(cfg *Config, parts []string) error {
 	return nil
 }
 
+type dslBlockFields struct {
+	values map[string][]string
+	blocks map[string]string
+}
+
+func (f dslBlockFields) one(key string) string {
+	values := f.values[key]
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func (f dslBlockFields) has(key string) bool {
+	_, ok := f.values[key]
+	return ok
+}
+
+func (f dslBlockFields) list(key string) []string {
+	values := f.values[key]
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (f dslBlockFields) blockText(key string) string {
+	return f.blocks[key]
+}
+
+func (p *DSLParser) parseBlockFields(body []dslBlockLine) (dslBlockFields, error) {
+	fields := dslBlockFields{
+		values: make(map[string][]string),
+		blocks: make(map[string]string),
+	}
+	for i := 0; i < len(body); i++ {
+		line := body[i]
+		text := trimDSLLine(line.text)
+		if len(text) == 0 || text[0] == '#' {
+			continue
+		}
+		parts, err := p.splitLineBytes(text)
+		if err != nil {
+			return fields, fmt.Errorf("line %d: %w", line.line, err)
+		}
+		if len(parts) == 0 || parts[0] == "}" {
+			continue
+		}
+		key := parts[0]
+		if len(parts) >= 2 && parts[1] == "{" {
+			collected, next, err := p.collectNestedBlock(body, i)
+			if err != nil {
+				return fields, err
+			}
+			if key == "when" || key == "condition" {
+				fields.blocks[key] = strings.Join(collected, " ")
+			} else {
+				fields.values[key] = append(fields.values[key], collected...)
+			}
+			i = next
+			continue
+		}
+		if len(parts) >= 2 && parts[1] == "[" {
+			collected, next, err := p.collectNestedList(body, i)
+			if err != nil {
+				return fields, err
+			}
+			fields.values[key] = append(fields.values[key], collected...)
+			i = next
+			continue
+		}
+		vals, err := p.parseBlockListTokens(parts[1:])
+		if err != nil {
+			return fields, fmt.Errorf("line %d: invalid %s value: %w", line.line, key, err)
+		}
+		fields.values[key] = append(fields.values[key], vals...)
+	}
+	return fields, nil
+}
+
+func (p *DSLParser) collectNestedBlock(body []dslBlockLine, start int) ([]string, int, error) {
+	depth := dslBraceDelta(body[start].text)
+	if depth <= 0 {
+		return nil, start, fmt.Errorf("line %d: malformed nested block", body[start].line)
+	}
+	values := make([]string, 0, 4)
+	for i := start + 1; i < len(body); i++ {
+		text := trimDSLLine(body[i].text)
+		oldDepth := depth
+		depth += dslBraceDelta(text)
+		if oldDepth == 1 && depth == 0 && isDSLClosingBraceLine(text) {
+			return values, i, nil
+		}
+		if len(text) != 0 && text[0] != '#' {
+			parts, err := p.splitLineBytes(text)
+			if err != nil {
+				return nil, i, fmt.Errorf("line %d: %w", body[i].line, err)
+			}
+			values = append(values, parts...)
+		}
+		if depth < 0 {
+			return nil, i, fmt.Errorf("line %d: unexpected block close", body[i].line)
+		}
+	}
+	return nil, start, fmt.Errorf("line %d: unterminated nested block", body[start].line)
+}
+
+func (p *DSLParser) collectNestedList(body []dslBlockLine, start int) ([]string, int, error) {
+	values := make([]string, 0, 4)
+	for i := start + 1; i < len(body); i++ {
+		text := trimDSLLine(body[i].text)
+		if len(text) == 0 || text[0] == '#' {
+			continue
+		}
+		parts, err := p.splitLineBytes(text)
+		if err != nil {
+			return nil, i, fmt.Errorf("line %d: %w", body[i].line, err)
+		}
+		if len(parts) == 1 && parts[0] == "]" {
+			return values, i, nil
+		}
+		for _, part := range parts {
+			part = strings.TrimSuffix(strings.TrimPrefix(part, "["), "]")
+			part = strings.TrimSuffix(part, ",")
+			part = strings.TrimSpace(parseQuotedString(part))
+			if part != "" {
+				values = append(values, part)
+			}
+		}
+	}
+	return nil, start, fmt.Errorf("line %d: unterminated list", body[start].line)
+}
+
+func (p *DSLParser) parseBlockListTokens(tokens []string) ([]string, error) {
+	if len(tokens) == 0 {
+		return nil, nil
+	}
+	if len(tokens) == 1 && !strings.HasPrefix(tokens[0], "[") && !strings.HasPrefix(tokens[0], "{") {
+		value := strings.TrimSpace(parseQuotedString(tokens[0]))
+		if value == "" {
+			return nil, nil
+		}
+		return []string{value}, nil
+	}
+	joined := strings.Join(tokens, " ")
+	joined = strings.TrimSpace(joined)
+	if strings.HasPrefix(joined, "[") {
+		if !strings.HasSuffix(joined, "]") {
+			return nil, fmt.Errorf("missing closing ]")
+		}
+		joined = strings.TrimSpace(joined[1 : len(joined)-1])
+	} else if strings.HasPrefix(joined, "{") {
+		if !strings.HasSuffix(joined, "}") {
+			return nil, fmt.Errorf("missing closing }")
+		}
+		joined = strings.TrimSpace(joined[1 : len(joined)-1])
+	}
+	if joined == "" {
+		return nil, nil
+	}
+	joined = strings.ReplaceAll(joined, ",", " ")
+	parts, err := p.splitLineBytes([]byte(joined))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(parseQuotedString(part))
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out, nil
+}
+
+func (p *DSLParser) actionsFromValues(values []string) ([]Action, error) {
+	if len(values) == 0 {
+		if p.strict {
+			return nil, fmt.Errorf("empty list")
+		}
+		return nil, nil
+	}
+	out := p.nextActionSlice(len(values))
+	for _, value := range values {
+		if strings.Contains(value, ",") {
+			actions, err := p.parseList(value)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, actions...)
+			continue
+		}
+		out = append(out, Action(value))
+	}
+	return out, nil
+}
+
+func (p *DSLParser) permissionsFromValues(values []string) ([]Permission, error) {
+	if len(values) == 0 {
+		if p.strict {
+			return nil, fmt.Errorf("empty permissions")
+		}
+		return nil, nil
+	}
+	out := p.nextPermissionSlice(len(values))
+	for _, value := range values {
+		if strings.Contains(value, ",") {
+			perms, err := p.parsePermissions(value)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, perms...)
+			continue
+		}
+		idx := strings.Index(value, ":")
+		if idx <= 0 || idx == len(value)-1 {
+			if p.strict {
+				return nil, fmt.Errorf("malformed permission %q", value)
+			}
+			continue
+		}
+		out = append(out, Permission{Action: Action(value[:idx]), Resource: value[idx+1:]})
+	}
+	return out, nil
+}
+
 func parseList(s string) []Action {
 	actions, _ := parseListStrict(s, false)
 	return actions
@@ -1478,7 +2017,7 @@ func (p *conditionParser) parseOr() (Expr, error) {
 	}
 	for {
 		p.skipSpace()
-		if !p.consume("||") && !p.consumeWord("OR") {
+		if !p.consume("||") && !p.consumeWordFold("or") {
 			return left, nil
 		}
 		right, err := p.parseAnd()
@@ -1496,7 +2035,7 @@ func (p *conditionParser) parseAnd() (Expr, error) {
 	}
 	for {
 		p.skipSpace()
-		if !p.consume("&&") && !p.consumeWord("AND") {
+		if !p.consume("&&") && !p.consumeWordFold("and") {
 			return left, nil
 		}
 		right, err := p.parsePrimary()
@@ -1532,25 +2071,15 @@ func (p *conditionParser) parseAtom() (Expr, error) {
 	if p.consume("(") {
 		return p.parseFunction(field)
 	}
-	if p.consumeWord("IN") {
-		p.skipSpace()
-		if !p.consume("[") {
-			return nil, fmt.Errorf("membership requires [values]")
-		}
-		raw := p.readValue("]")
-		if !p.consume("]") {
-			return nil, fmt.Errorf("membership requires closing ]")
-		}
-		raw = strings.ReplaceAll(raw, ",", " ")
-		parts := strings.Fields(raw)
-		if len(parts) == 0 {
-			return nil, fmt.Errorf("empty membership values")
-		}
-		values := make([]any, 0, len(parts))
-		for _, part := range parts {
-			values = append(values, strings.Trim(part, `"'`))
-		}
-		return &InExpr{Field: field, Values: values}, nil
+	if p.consumeWordFold("in") {
+		return p.parseMembershipList(field)
+	}
+	if p.consumeWordFold("contains") {
+		p.consumeWordFold("any")
+		return p.parseMembershipList(field)
+	}
+	if p.consumeWordFold("has_any") || p.consumeWordFold("has") {
+		return p.parseMembershipList(field)
 	}
 	switch {
 	case p.consume("!="):
@@ -1594,6 +2123,27 @@ func (p *conditionParser) parseAtom() (Expr, error) {
 	default:
 		return nil, fmt.Errorf("unsupported condition %q", p.input)
 	}
+}
+
+func (p *conditionParser) parseMembershipList(field string) (Expr, error) {
+	p.skipSpace()
+	if !p.consume("[") {
+		return nil, fmt.Errorf("membership requires [values]")
+	}
+	raw := p.readValue("]")
+	if !p.consume("]") {
+		return nil, fmt.Errorf("membership requires closing ]")
+	}
+	raw = strings.ReplaceAll(raw, ",", " ")
+	parts := strings.Fields(raw)
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("empty membership values")
+	}
+	values := make([]any, 0, len(parts))
+	for _, part := range parts {
+		values = append(values, strings.Trim(part, `"'`))
+	}
+	return &InExpr{Field: field, Values: values}, nil
 }
 
 func (p *conditionParser) parseFunction(name string) (Expr, error) {
@@ -1674,6 +2224,22 @@ func (p *conditionParser) consumeWord(s string) bool {
 	if end < len(p.input) {
 		ch := p.input[end]
 		if ch != ' ' && ch != '\t' && ch != ')' {
+			return false
+		}
+	}
+	p.pos = end
+	return true
+}
+
+func (p *conditionParser) consumeWordFold(s string) bool {
+	p.skipSpace()
+	end := p.pos + len(s)
+	if end > len(p.input) || !strings.EqualFold(p.input[p.pos:end], s) {
+		return false
+	}
+	if end < len(p.input) {
+		ch := p.input[end]
+		if ch != ' ' && ch != '\t' && ch != ')' && ch != '[' {
 			return false
 		}
 	}
