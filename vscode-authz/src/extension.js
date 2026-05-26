@@ -386,6 +386,308 @@ function deactivate() {
   if (authzLspClient) authzLspClient.stop();
 }
 
+function startAuthzLanguageServer(context, output, diagnostics) {
+  const serverPath = path.join(context.extensionPath, "src", "server.js");
+  if (!fs.existsSync(serverPath)) {
+    output.appendLine(`AuthZ LSP server not found: ${serverPath}`);
+    return undefined;
+  }
+  const client = new AuthzLSPClient(serverPath, output, diagnostics);
+  context.subscriptions.push({ dispose: () => client.stop() });
+  client.start();
+  return client;
+}
+
+class AuthzLSPClient {
+  constructor(serverPath, output, diagnostics) {
+    this.serverPath = serverPath;
+    this.output = output;
+    this.diagnostics = diagnostics;
+    this.child = undefined;
+    this.buffer = Buffer.alloc(0);
+    this.nextID = 1;
+    this.pending = new Map();
+    this.running = false;
+  }
+
+  start() {
+    if (this.running) return;
+    this.child = cp.spawn(process.execPath, [this.serverPath], {
+      cwd: path.dirname(path.dirname(this.serverPath)),
+      env: { ...process.env },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    this.running = true;
+    this.child.stdout.on("data", (chunk) => this.read(chunk));
+    this.child.stderr.on("data", (chunk) => this.output.appendLine(`[authz-lsp] ${chunk.toString().trimEnd()}`));
+    this.child.on("exit", (code, signal) => {
+      this.running = false;
+      this.output.appendLine(`[authz-lsp] exited code=${code} signal=${signal || ""}`);
+      for (const pending of this.pending.values()) pending.resolve(undefined);
+      this.pending.clear();
+    });
+    this.initialize().catch((err) => this.output.appendLine(`[authz-lsp] initialize failed: ${err.message}`));
+  }
+
+  async initialize() {
+    const folders = (vscode.workspace.workspaceFolders || []).map((folder) => ({ uri: folder.uri.toString(), name: folder.name }));
+    await this.request("initialize", {
+      processId: process.pid,
+      rootUri: folders[0] ? folders[0].uri : null,
+      workspaceFolders: folders,
+      capabilities: {}
+    });
+    this.notify("initialized", {});
+    for (const document of vscode.workspace.textDocuments) {
+      if (document.languageId === "authz") this.didOpenOrChange(document, true);
+    }
+    this.output.appendLine("[authz-lsp] server running.");
+  }
+
+  didOpenOrChange(document, forceOpen = false) {
+    if (!this.running) return;
+    const uri = document.uri.toString();
+    if (forceOpen) {
+      this.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "authz", version: document.version, text: document.getText() }
+      });
+      return;
+    }
+    this.notify("textDocument/didChange", {
+      textDocument: { uri, version: document.version },
+      contentChanges: [{ text: document.getText() }]
+    });
+  }
+
+  didClose(document) {
+    if (!this.running) return;
+    this.notify("textDocument/didClose", { textDocument: { uri: document.uri.toString() } });
+  }
+
+  request(method, params, timeoutMS = 800) {
+    if (!this.running || !this.child || !this.child.stdin.writable) return Promise.resolve(undefined);
+    const id = this.nextID++;
+    const message = { jsonrpc: "2.0", id, method, params };
+    this.write(message);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        resolve(undefined);
+      }, timeoutMS);
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        }
+      });
+    });
+  }
+
+  notify(method, params) {
+    if (!this.running || !this.child || !this.child.stdin.writable) return;
+    this.write({ jsonrpc: "2.0", method, params });
+  }
+
+  write(message) {
+    const json = JSON.stringify(message);
+    this.child.stdin.write(`Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n${json}`);
+  }
+
+  read(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (true) {
+      const sep = this.buffer.indexOf("\r\n\r\n");
+      if (sep === -1) return;
+      const header = this.buffer.slice(0, sep).toString("utf8");
+      const match = /Content-Length:\s*(\d+)/i.exec(header);
+      if (!match) {
+        this.buffer = this.buffer.slice(sep + 4);
+        continue;
+      }
+      const length = Number(match[1]);
+      const start = sep + 4;
+      const end = start + length;
+      if (this.buffer.length < end) return;
+      const raw = this.buffer.slice(start, end).toString("utf8");
+      this.buffer = this.buffer.slice(end);
+      try {
+        this.handle(JSON.parse(raw));
+      } catch (err) {
+        this.output.appendLine(`[authz-lsp] bad message: ${err.message}`);
+      }
+    }
+  }
+
+  handle(message) {
+    if (message.id !== undefined && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      pending.resolve(message.result);
+      return;
+    }
+    if (message.method === "textDocument/publishDiagnostics" && message.params) {
+      const uri = vscode.Uri.parse(message.params.uri);
+      const diagnostics = (message.params.diagnostics || []).map(lspDiagnosticToVscode);
+      this.diagnostics.set(uri, diagnostics);
+      return;
+    }
+    if (message.method === "window/logMessage" && message.params) {
+      this.output.appendLine(`[authz-lsp] ${message.params.message}`);
+    }
+  }
+
+  stop() {
+    if (!this.child) return;
+    if (this.running) {
+      this.request("shutdown", null, 250).finally(() => {
+        try {
+          this.notify("exit", null);
+          this.child.kill();
+        } catch {
+          // Best-effort shutdown.
+        }
+      });
+    }
+    this.running = false;
+  }
+}
+
+async function lspCompletion(document, position) {
+  const result = await lspRequest("textDocument/completion", lspTextPosition(document, position));
+  if (!result) return undefined;
+  const items = Array.isArray(result) ? result : result.items;
+  if (!items || items.length === 0) return undefined;
+  return items.map(lspCompletionToVscode);
+}
+
+async function lspHoverAt(document, position) {
+  const result = await lspRequest("textDocument/hover", lspTextPosition(document, position));
+  if (!result || !result.contents) return undefined;
+  return new vscode.Hover(markdownFromLsp(result.contents), lspRange(result.range));
+}
+
+async function lspDefinitionAt(document, position) {
+  const result = await lspRequest("textDocument/definition", lspTextPosition(document, position));
+  return lspLocations(result);
+}
+
+async function lspReferencesAt(document, position) {
+  const result = await lspRequest("textDocument/references", {
+    ...lspTextPosition(document, position),
+    context: { includeDeclaration: true }
+  });
+  return lspLocations(result);
+}
+
+async function lspDocumentSymbols(document) {
+  const result = await lspRequest("textDocument/documentSymbol", { textDocument: lspTextDocument(document) });
+  if (!Array.isArray(result) || result.length === 0) return undefined;
+  return result.map((symbol) => new vscode.DocumentSymbol(
+    symbol.name,
+    symbol.detail || "",
+    symbolKindFromLsp(symbol.kind),
+    lspRange(symbol.range),
+    lspRange(symbol.selectionRange || symbol.range)
+  ));
+}
+
+async function lspFormattingEdits(document) {
+  const result = await lspRequest("textDocument/formatting", {
+    textDocument: lspTextDocument(document),
+    options: { tabSize: 2, insertSpaces: true }
+  });
+  if (!Array.isArray(result) || result.length === 0) return undefined;
+  return result.map((edit) => vscode.TextEdit.replace(lspRange(edit.range), edit.newText));
+}
+
+function lspRequest(method, params) {
+  if (!authzLspClient || !authzLspClient.running) return Promise.resolve(undefined);
+  return authzLspClient.request(method, params);
+}
+
+function lspTextPosition(document, position) {
+  return { textDocument: lspTextDocument(document), position: { line: position.line, character: position.character } };
+}
+
+function lspTextDocument(document) {
+  return { uri: document.uri.toString() };
+}
+
+function lspCompletionToVscode(item) {
+  const completionItem = new vscode.CompletionItem(item.label, completionKindFromLsp(item.kind));
+  completionItem.detail = item.detail;
+  completionItem.documentation = item.documentation ? markdownFromLsp(item.documentation) : undefined;
+  if (item.insertText) {
+    completionItem.insertText = item.insertTextFormat === 2 ? new vscode.SnippetString(item.insertText) : item.insertText;
+  }
+  return completionItem;
+}
+
+function markdownFromLsp(value) {
+  if (!value) return undefined;
+  if (typeof value === "string") return new vscode.MarkdownString(value);
+  if (Array.isArray(value)) return new vscode.MarkdownString(value.map((item) => typeof item === "string" ? item : item.value || "").join("\n\n"));
+  return new vscode.MarkdownString(value.value || "");
+}
+
+function lspLocations(result) {
+  if (!result) return undefined;
+  const values = Array.isArray(result) ? result : [result];
+  if (values.length === 0) return undefined;
+  return values.map((loc) => new vscode.Location(vscode.Uri.parse(loc.uri), lspRange(loc.range)));
+}
+
+function lspRange(range) {
+  if (!range) return undefined;
+  return new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character);
+}
+
+function lspDiagnosticToVscode(diagnostic) {
+  const out = new vscode.Diagnostic(lspRange(diagnostic.range), diagnostic.message, diagnosticSeverityFromLsp(diagnostic.severity));
+  out.source = diagnostic.source || "authz-lsp";
+  return out;
+}
+
+function diagnosticSeverityFromLsp(severity) {
+  if (severity === 1) return vscode.DiagnosticSeverity.Error;
+  if (severity === 2) return vscode.DiagnosticSeverity.Warning;
+  if (severity === 3) return vscode.DiagnosticSeverity.Information;
+  return vscode.DiagnosticSeverity.Hint;
+}
+
+function completionKindFromLsp(kind) {
+  const map = {
+    3: vscode.CompletionItemKind.Function,
+    5: vscode.CompletionItemKind.Field,
+    10: vscode.CompletionItemKind.Property,
+    12: vscode.CompletionItemKind.Value,
+    14: vscode.CompletionItemKind.Keyword,
+    17: vscode.CompletionItemKind.File,
+    18: vscode.CompletionItemKind.Reference,
+    20: vscode.CompletionItemKind.EnumMember,
+    24: vscode.CompletionItemKind.Operator
+  };
+  return map[kind] || vscode.CompletionItemKind.Text;
+}
+
+function symbolKindFromLsp(kind) {
+  const map = {
+    3: vscode.SymbolKind.Namespace,
+    5: vscode.SymbolKind.Class,
+    6: vscode.SymbolKind.Method,
+    8: vscode.SymbolKind.Field,
+    9: vscode.SymbolKind.Constructor,
+    10: vscode.SymbolKind.Enum,
+    12: vscode.SymbolKind.Function,
+    13: vscode.SymbolKind.Variable,
+    18: vscode.SymbolKind.Array,
+    19: vscode.SymbolKind.Object,
+    20: vscode.SymbolKind.Key,
+    22: vscode.SymbolKind.Event
+  };
+  return map[kind] || vscode.SymbolKind.String;
+}
+
 async function provideCompletions(document, position) {
   const text = document.lineAt(position.line).text.slice(0, position.character);
   const parsed = parseLine(text);
