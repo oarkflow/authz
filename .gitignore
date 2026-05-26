@@ -1,3 +1,4 @@
 .gocache
 .gomodcache
 node_modules
+*.vsix

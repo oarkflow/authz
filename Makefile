@@ -2,6 +2,7 @@ EXT_DIR := vscode-authz
 EXT_ID := oarkflow.authz-dsl
 CODE ?= code
 VSCE ?= vsce
+PNPM ?= pnpm
 SAMPLE ?= examples/config.authz
 
 VERSION := $(shell node -p "require('./$(EXT_DIR)/package.json').version")
@@ -23,7 +24,7 @@ endif
 all: authz-ext-dev
 
 authz-ext-build:
-	cd $(EXT_DIR) && $(VSCE) package --allow-missing-repository
+	cd $(EXT_DIR) && $(PNPM) exec $(VSCE) package --allow-missing-repository --no-dependencies
 
 authz-ext-install: authz-ext-build
 	$(CODE) --install-extension $(VSIX) --force

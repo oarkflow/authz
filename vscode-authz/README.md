@@ -11,6 +11,7 @@ Syntax highlighting, snippets, hovers, diagnostics, formatting, and IntelliSense
 - Hovers for directives and condition functions.
 - Lightweight diagnostics for unknown directives/options, bad effects, malformed role permissions, duplicate IDs, empty list items, invalid expiration timestamps, and unterminated quotes.
 - Basic document formatting that trims trailing whitespace and normalizes inline comment spacing.
+- A standalone stdio LSP server at `src/server.js` for `.authz`/`.dsl` completion, hover details, diagnostics, definitions, references, document symbols, and formatting.
 
 ## Run Locally
 
@@ -24,6 +25,16 @@ Syntax highlighting, snippets, hovers, diagnostics, formatting, and IntelliSense
 3. Open `examples/config.authz` from this repository in the new VS Code window.
 
 The extension is dependency-free at runtime and uses plain JavaScript, so it does not need a compile step.
+
+## Language Server
+
+The bundled server speaks standard LSP JSON-RPC over stdio:
+
+```bash
+pnpm run lsp
+```
+
+It keeps an in-memory workspace index for tenants, roles, users, groups, scopes, service accounts, policies, ACLs, boundaries, actions, resources, and subject references. Built-in diagnostics are always available; set `AUTHZ_LSP_CLI=1` to additionally call `go run ./cmd/authz-config validate` when a matching authz workspace is open.
 
 ## Syntax Reference
 

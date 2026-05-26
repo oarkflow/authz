@@ -6,6 +6,7 @@ const path = require("path");
 const cp = require("child_process");
 
 const language = { language: "authz", scheme: "file" };
+let authzLspClient;
 
 const directives = [
   ["include", "include \"./other.authz\"", "Include another .authz file"],
@@ -78,15 +79,22 @@ const conditionFunctions = [
   ["time_between(${1:09:00},${2:18:00})", "time_between(start, end)"],
   ["range(${1:subject.attrs.score},${2:1},${3:10})", "range(field, min, max)"]
 ];
-const conditionOperators = ["=", "==", "!=", ">=", "@", " IN ", " && ", " || ", " AND ", " OR "];
+const conditionOperators = ["=", "==", "!=", ">=", "@", " in [${1:value}]", " contains any [${1:value}]", " has_any [${1:value}]", " has [${1:value}]", " && ", " || ", " AND ", " OR ", "(", ")", "true"];
 const blockDirectiveNames = new Set(["tenant", "policy", "role", "acl", "member", "members", "engine"]);
 const blockFieldsByDirective = {
   tenant: ["name", "parent"],
   policy: ["tenant", "effect", "actions", "resources", "when", "priority"],
   role: ["tenant", "name", "permissions", "inherits", "owner_actions"],
-  acl: ["resource", "subject", "actions", "effect", "expires"],
+  acl: ["tenant", "resource", "subject", "actions", "effect", "expires"],
   member: ["roles"],
   engine: ["cache_ttl", "attr_ttl", "batch_size", "flush_interval", "workers"]
+};
+const requiredBlockFields = {
+  tenant: ["name"],
+  policy: ["tenant", "effect", "actions", "resources"],
+  role: ["tenant", "permissions"],
+  acl: ["resource", "subject", "actions", "effect"],
+  member: ["roles"]
 };
 
 const directiveDocs = new Map(directives.map(([name, syntax, description]) => [name, { syntax, description }]));
@@ -212,7 +220,11 @@ const explanationRegistry = {
     ["!=", ["Inequality", "Matches when a field is not equal to a value.", "`subject.attrs.clearance!=high`."]],
     [">=", ["Greater-than-or-equal", "Numeric/string comparison used by the condition parser.", "`subject.attrs.level>=3`."]],
     ["@", ["Membership", "Matches when the field/list contains any listed value.", "`subject.roles@admin,superadmin`."]],
+    ["in", ["Membership", "Matches against values in brackets.", "`subject.type in [user service]`."]],
     ["IN", ["Membership", "Matches against values in brackets.", "`subject.type IN [user service]`."]],
+    ["contains", ["Membership", "Checks whether a list-like field contains values.", "`subject.roles contains any [admin superadmin]`."]],
+    ["has_any", ["Membership", "Alias-style membership check against bracketed values.", "`subject.groups has_any [engineering ops]`."]],
+    ["has", ["Membership", "Membership check against bracketed values.", "`subject.groups has [engineering]`."]],
     ["&&", ["Logical AND", "Both sides must match.", "`subject.type=user && resource.owner_id=subject.id`."]],
     ["AND", ["Logical AND", "Word form of `&&`.", "`subject.type=user AND resource.type=document`."]],
     ["||", ["Logical OR", "Either side may match.", "`subject.roles@admin || resource.owner_id=subject.id`."]],
@@ -233,27 +245,38 @@ function activate(context) {
 
   const diagnostics = vscode.languages.createDiagnosticCollection("authz");
   context.subscriptions.push(diagnostics);
+  const lspDiagnostics = vscode.languages.createDiagnosticCollection("authz-lsp");
+  context.subscriptions.push(lspDiagnostics);
+  authzLspClient = startAuthzLanguageServer(context, output, lspDiagnostics);
 
   context.subscriptions.push(vscode.languages.registerCompletionItemProvider(language, {
     async provideCompletionItems(document, position) {
+      const lspItems = await lspCompletion(document, position);
+      if (lspItems) return lspItems;
       return provideCompletions(document, position);
     }
   }, " ", ":", "=", ",", ".", "@", "[", "{"));
 
   context.subscriptions.push(vscode.languages.registerHoverProvider(language, {
-    provideHover(document, position) {
+    async provideHover(document, position) {
+      const lspHover = await lspHoverAt(document, position);
+      if (lspHover) return lspHover;
       return provideHover(document, position);
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerDefinitionProvider(language, {
     async provideDefinition(document, position) {
+      const lspDefinition = await lspDefinitionAt(document, position);
+      if (lspDefinition) return lspDefinition;
       return provideDefinition(document, position);
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerReferenceProvider(language, {
     async provideReferences(document, position) {
+      const lspReferences = await lspReferencesAt(document, position);
+      if (lspReferences) return lspReferences;
       return provideReferences(document, position);
     }
   }));
@@ -280,13 +303,17 @@ function activate(context) {
   }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] }));
 
   context.subscriptions.push(vscode.languages.registerDocumentSymbolProvider(language, {
-    provideDocumentSymbols(document) {
+    async provideDocumentSymbols(document) {
+      const lspSymbols = await lspDocumentSymbols(document);
+      if (lspSymbols) return lspSymbols;
       return provideDocumentSymbols(document);
     }
   }));
 
   context.subscriptions.push(vscode.languages.registerDocumentFormattingEditProvider(language, {
-    provideDocumentFormattingEdits(document) {
+    async provideDocumentFormattingEdits(document) {
+      const lspEdits = await lspFormattingEdits(document);
+      if (lspEdits) return lspEdits;
       return formatDocument(document);
     }
   }));
@@ -299,7 +326,8 @@ function activate(context) {
   context.subscriptions.push(vscode.commands.registerCommand("authz.showStatus", () => {
     const editor = vscode.window.activeTextEditor;
     const languageId = editor ? editor.document.languageId : "none";
-    vscode.window.showInformationMessage(`AuthZ DSL extension is active. Current language mode: ${languageId}`);
+    const lspState = authzLspClient && authzLspClient.running ? "running" : "stopped";
+    vscode.window.showInformationMessage(`AuthZ DSL extension is active. Current language mode: ${languageId}. LSP: ${lspState}.`);
     output.show(true);
   }));
 
@@ -334,6 +362,7 @@ function activate(context) {
 
   const refresh = (document) => {
     if (document.languageId === "authz") {
+      if (authzLspClient) authzLspClient.didOpenOrChange(document);
       diagnostics.set(document.uri, validateDocument(document));
       output.appendLine(`Validated ${document.uri.fsPath}`);
     }
@@ -343,13 +372,19 @@ function activate(context) {
   context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((document) => {
     if (document.languageId === "authz") validateFileWithCLI(document, output, diagnostics);
   }));
-  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((document) => diagnostics.delete(document.uri)));
+  context.subscriptions.push(vscode.workspace.onDidCloseTextDocument((document) => {
+    diagnostics.delete(document.uri);
+    lspDiagnostics.delete(document.uri);
+    if (authzLspClient && document.languageId === "authz") authzLspClient.didClose(document);
+  }));
   context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(updateStatus));
   vscode.workspace.textDocuments.forEach(refresh);
   updateStatus();
 }
 
-function deactivate() {}
+function deactivate() {
+  if (authzLspClient) authzLspClient.stop();
+}
 
 async function provideCompletions(document, position) {
   const text = document.lineAt(position.line).text.slice(0, position.character);
@@ -1338,7 +1373,9 @@ function validateDocument(document) {
     }
     if (startsBlock) {
       checkDuplicateIds(document, diagnostics, lineNo, tokens, seen);
-      lineNo = collectDocumentBlock(document, lineNo).end;
+      const block = collectDocumentBlock(document, lineNo);
+      checkBlock(document, diagnostics, lineNo, block.end, tokens);
+      lineNo = block.end;
       continue;
     }
     checkArity(document, diagnostics, lineNo, text, tokens);
@@ -1375,6 +1412,105 @@ function checkOptions(document, diagnostics, lineNo, text, tokens) {
     if (isResourceLike(token) || isSubjectLike(token) || isPermissionLike(token)) continue;
     if (allowed.size > 0 && !allowed.has(prefix)) {
       diagnostics.push(rangeDiag(document, lineNo, token, `Unknown ${directive} option "${prefix}".`, vscode.DiagnosticSeverity.Error));
+    }
+  }
+}
+
+function checkBlock(document, diagnostics, startLine, endLine, headerTokens) {
+  const directive = headerTokens[0];
+  const allowed = new Set(blockFieldsByDirective[directive] || []);
+  const seenFields = new Set();
+  let activeList = "";
+  let activeNested = "";
+
+  if (directive !== "members" && directive !== "engine" && headerTokens.length !== 3) {
+    diagnostics.push(diag(startLine, 0, document.lineAt(startLine).text.length, `${directive} block requires exactly one id before "{".`, vscode.DiagnosticSeverity.Error));
+  }
+  if ((directive === "members" || directive === "engine") && headerTokens.length !== 2) {
+    diagnostics.push(diag(startLine, 0, document.lineAt(startLine).text.length, `${directive} block does not take an id.`, vscode.DiagnosticSeverity.Error));
+  }
+
+  for (let lineNo = startLine + 1; lineNo <= endLine; lineNo++) {
+    const text = document.lineAt(lineNo).text;
+    const parsed = parseLine(text);
+    const tokens = parsed.tokens;
+    if (parsed.error) {
+      diagnostics.push(diag(lineNo, 0, text.length, parsed.error, vscode.DiagnosticSeverity.Error));
+      continue;
+    }
+    if (tokens.length === 0) continue;
+    if (tokens.length === 1 && tokens[0] === "]") {
+      activeList = "";
+      continue;
+    }
+    if (tokens.length === 1 && tokens[0] === "}") {
+      activeNested = "";
+      continue;
+    }
+    if (directive === "members") {
+      checkMembersBlockRow(document, diagnostics, lineNo, tokens);
+      continue;
+    }
+
+    const field = activeList || activeNested || tokens[0];
+    const valueTokens = activeList || activeNested ? tokens : tokens.slice(1);
+
+    if (!activeList && !activeNested) {
+      if (allowed.size && !allowed.has(field)) {
+        diagnostics.push(rangeDiag(document, lineNo, field, `Unknown ${directive} block field "${field}".`, vscode.DiagnosticSeverity.Error));
+      }
+      seenFields.add(field);
+      if (tokens[1] === "[") {
+        activeList = field;
+        continue;
+      }
+      if (tokens[1] === "{") {
+        activeNested = field;
+        continue;
+      }
+    }
+
+    checkBlockFieldValues(document, diagnostics, lineNo, directive, field, valueTokens);
+  }
+
+  for (const field of requiredBlockFields[directive] || []) {
+    if (!seenFields.has(field)) {
+      diagnostics.push(diag(startLine, 0, document.lineAt(startLine).text.length, `${directive} block is missing required field "${field}".`, vscode.DiagnosticSeverity.Warning));
+    }
+  }
+}
+
+function checkMembersBlockRow(document, diagnostics, lineNo, tokens) {
+  if (tokens.length < 2) {
+    diagnostics.push(diag(lineNo, 0, document.lineAt(lineNo).text.length, `members rows require: <subject> [roles].`, vscode.DiagnosticSeverity.Warning));
+    return;
+  }
+  if (!isSubjectLike(tokens[0])) {
+    diagnostics.push(rangeDiag(document, lineNo, tokens[0], `Member subject should be namespaced like user:alice, group:engineering, service:worker, guest, or *.`, vscode.DiagnosticSeverity.Warning));
+  }
+}
+
+function checkBlockFieldValues(document, diagnostics, lineNo, directive, field, values) {
+  const cleanValues = values.map(cleanBlockValue).filter((value) => value && value !== "[" && value !== "]" && value !== "{");
+  if ((field === "effect") && cleanValues[0] && !effects.includes(cleanValues[0])) {
+    diagnostics.push(rangeDiag(document, lineNo, cleanValues[0], `Effect must be allow or deny.`, vscode.DiagnosticSeverity.Error));
+  }
+  if (field === "permissions") {
+    for (const perm of cleanValues) {
+      if (perm !== "*:*" && !isPermissionLike(perm)) {
+        diagnostics.push(rangeDiag(document, lineNo, perm, `Role permissions must use action:resource syntax.`, vscode.DiagnosticSeverity.Error));
+      }
+    }
+  }
+  if (field === "expires" && cleanValues[0] && Number.isNaN(Date.parse(cleanValues[0]))) {
+    diagnostics.push(rangeDiag(document, lineNo, cleanValues[0], `expires must be an RFC3339 timestamp.`, vscode.DiagnosticSeverity.Error));
+  }
+  if (directive === "engine" && field && !engineOptions.some(([opt]) => opt.slice(0, -1) === field)) {
+    diagnostics.push(rangeDiag(document, lineNo, field, `Unknown engine option "${field}".`, vscode.DiagnosticSeverity.Error));
+  }
+  for (const value of cleanValues) {
+    if (value.includes(",,")) {
+      diagnostics.push(rangeDiag(document, lineNo, value, `Lists cannot contain empty items.`, vscode.DiagnosticSeverity.Error));
     }
   }
 }
