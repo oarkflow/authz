@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/oarkflow/authz"
-	"gopkg.in/yaml.v3"
 )
 
 type benchmarkWireConfig struct {
@@ -202,31 +201,6 @@ func BenchmarkBinaryDecode(b *testing.B) {
 	}
 }
 
-// Benchmark YAML Encoding
-func BenchmarkYAMLEncode(b *testing.B) {
-	cfg := generateTestConfig(10, 5)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		_, _ = yaml.Marshal(cfg)
-	}
-}
-
-// Benchmark YAML Decoding
-func BenchmarkYAMLDecode(b *testing.B) {
-	b.Skip("YAML decode has issues with Expr interface")
-	cfg := generateTestConfig(10, 5)
-	data, _ := yaml.Marshal(cfg)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		var decoded authz.Config
-		_ = yaml.Unmarshal(data, &decoded)
-	}
-}
-
 // Benchmark JSON Encoding
 func BenchmarkJSONEncode(b *testing.B) {
 	cfg := generateTestConfig(10, 5)
@@ -255,7 +229,6 @@ func BenchmarkConfigFormatDecodeSmall(b *testing.B) {
 	wire := generateBenchmarkWireConfig(10, 5)
 	dsl := generateBenchmarkDSL(10, 5)
 	jsonData, _ := json.Marshal(wire)
-	yamlData, _ := yaml.Marshal(wire)
 
 	b.Run("DSL", func(b *testing.B) {
 		parser := authz.NewDSLParser()
@@ -271,15 +244,6 @@ func BenchmarkConfigFormatDecodeSmall(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			var decoded benchmarkWireConfig
 			if err := json.Unmarshal(jsonData, &decoded); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("YAML", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			var decoded benchmarkWireConfig
-			if err := yaml.Unmarshal(yamlData, &decoded); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -309,7 +273,6 @@ func BenchmarkConfigFormatDecodeLarge(b *testing.B) {
 	wire := generateBenchmarkWireConfig(100, 50)
 	dsl := generateBenchmarkDSL(100, 50)
 	jsonData, _ := json.Marshal(wire)
-	yamlData, _ := yaml.Marshal(wire)
 
 	b.Run("DSL", func(b *testing.B) {
 		parser := authz.NewDSLParser()
@@ -325,15 +288,6 @@ func BenchmarkConfigFormatDecodeLarge(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			var decoded benchmarkWireConfig
 			if err := json.Unmarshal(jsonData, &decoded); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-	b.Run("YAML", func(b *testing.B) {
-		b.ReportAllocs()
-		for i := 0; i < b.N; i++ {
-			var decoded benchmarkWireConfig
-			if err := yaml.Unmarshal(yamlData, &decoded); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -422,29 +376,6 @@ func BenchmarkBinaryDecodeLarge(b *testing.B) {
 	}
 }
 
-func BenchmarkYAMLEncodeLarge(b *testing.B) {
-	cfg := generateTestConfig(100, 50)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		_, _ = yaml.Marshal(cfg)
-	}
-}
-
-func BenchmarkYAMLDecodeLarge(b *testing.B) {
-	b.Skip("YAML decode has issues with Expr interface")
-	cfg := generateTestConfig(100, 50)
-	data, _ := yaml.Marshal(cfg)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		var decoded authz.Config
-		_ = yaml.Unmarshal(data, &decoded)
-	}
-}
-
 // Size comparison test
 func TestSizeComparison(t *testing.T) {
 	cfg := generateTestConfig(100, 50)
@@ -453,14 +384,10 @@ func TestSizeComparison(t *testing.T) {
 	encoder := authz.NewBinaryEncoder()
 	binaryData, _ := encoder.Encode(cfg)
 
-	// YAML
-	yamlData, _ := yaml.Marshal(cfg)
-
 	// JSON
 	jsonData, _ := cfg.ToJSON()
 
 	t.Logf("Size Comparison (100 policies, 50 roles):")
 	t.Logf("  Binary: %d bytes (100%%)", len(binaryData))
-	t.Logf("  YAML:   %d bytes (%.0f%%)", len(yamlData), float64(len(yamlData))/float64(len(binaryData))*100)
 	t.Logf("  JSON:   %d bytes (%.0f%%)", len(jsonData), float64(len(jsonData))/float64(len(binaryData))*100)
 }

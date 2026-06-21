@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Config represents the complete authz configuration
@@ -61,14 +59,6 @@ func NewConfigLoader() *ConfigLoader {
 	return &ConfigLoader{}
 }
 
-func (l *ConfigLoader) LoadYAML(data []byte) (*Config, error) {
-	cfg := &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
-}
-
 func (l *ConfigLoader) LoadJSON(data []byte) (*Config, error) {
 	cfg := &Config{}
 	if err := json.Unmarshal(data, cfg); err != nil {
@@ -90,11 +80,6 @@ func EncodeBinaryConfig(cfg *Config) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// ToYAML exports config to YAML
-func (c *Config) ToYAML() ([]byte, error) {
-	return yaml.Marshal(c)
 }
 
 // ToJSON exports config to JSON
