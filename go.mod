@@ -5,7 +5,6 @@ go 1.25.7
 require (
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/oarkflow/date v0.0.4
-	github.com/oarkflow/log v1.0.84
 	github.com/oarkflow/squealx v0.0.77
 	github.com/redis/go-redis/v9 v9.20.1
 	go.opentelemetry.io/otel v1.44.0
@@ -27,7 +26,6 @@ require (
 	github.com/oarkflow/expr v0.0.11 // indirect
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/json v0.0.28 // indirect
-	github.com/oarkflow/xid v1.2.9 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
