@@ -15,9 +15,6 @@ func main() {
 	// Example 1: Build configuration programmatically
 	buildConfigExample()
 
-	// Example 2: Load from YAML file
-	loadYAMLExample()
-
 	// Example 3: Binary protocol for high performance
 	binaryProtocolExample()
 
@@ -74,58 +71,12 @@ func buildConfigExample() {
 		}).
 		Build()
 
-	// Export to YAML
-	yamlData, err := cfg.ToYAML()
+	// Export to JSON
+	jsonData, err := cfg.ToJSON()
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Generated YAML config (%d bytes):\n%s\n\n", len(yamlData), string(yamlData))
-}
-
-func loadYAMLExample() {
-	fmt.Println("=== Loading Configuration from YAML ===")
-
-	yamlConfig := `
-version: 1
-tenants:
-  - id: company1
-    name: Company 1
-    parent: ""
-policies:
-  - id: allow-read-all
-    tenant_id: company1
-    effect: allow
-    actions: [read]
-    resources: ["*"]
-    condition:
-      op: eq
-      field: subject.type
-      value: user
-    priority: 1
-    enabled: true
-roles:
-  - id: viewer
-    tenant_id: company1
-    name: Viewer
-    permissions:
-      - action: read
-        resource: "*"
-engine:
-  decision_cache_ttl_ms: 3000
-  audit_batch_size: 64
-`
-
-	loader := authz.NewConfigLoader()
-	cfg, err := loader.LoadYAML([]byte(yamlConfig))
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("Loaded config version: %d\n", cfg.Version)
-	fmt.Printf("Tenants: %d\n", len(cfg.Tenants))
-	fmt.Printf("Policies: %d\n", len(cfg.Policies))
-	fmt.Printf("Roles: %d\n", len(cfg.Roles))
-	fmt.Println()
+	fmt.Printf("Generated JSON config (%d bytes):\n%s\n\n", len(jsonData), string(jsonData))
 }
 
 func binaryProtocolExample() {
@@ -158,9 +109,6 @@ func binaryProtocolExample() {
 
 	// Measure YAML encoding
 	start := time.Now()
-	yamlData, _ := config.ToYAML()
-	yamlTime := time.Since(start)
-
 	// Measure JSON encoding
 	start = time.Now()
 	jsonData, _ := config.ToJSON()
@@ -171,11 +119,8 @@ func binaryProtocolExample() {
 	binaryData, _ := authz.EncodeBinaryConfig(config)
 	binaryTime := time.Since(start)
 
-	fmt.Printf("YAML:   %d bytes, encoded in %v\n", len(yamlData), yamlTime)
 	fmt.Printf("JSON:   %d bytes, encoded in %v\n", len(jsonData), jsonTime)
 	fmt.Printf("Binary: %d bytes, encoded in %v\n", len(binaryData), binaryTime)
-	fmt.Printf("Binary is %.1f%% smaller than YAML\n", (1-float64(len(binaryData))/float64(len(yamlData)))*100)
-	fmt.Printf("Binary is %.2fx faster than YAML\n", float64(yamlTime)/float64(binaryTime))
 	fmt.Println()
 }
 
@@ -305,10 +250,6 @@ func loadConfigFromFile(filename string) (*authz.Config, error) {
 
 	// Detect format by extension
 	switch {
-	case len(filename) > 5 && filename[len(filename)-5:] == ".yaml":
-		return loader.LoadYAML(data)
-	case len(filename) > 4 && filename[len(filename)-4:] == ".yml":
-		return loader.LoadYAML(data)
 	case len(filename) > 5 && filename[len(filename)-5:] == ".json":
 		return loader.LoadJSON(data)
 	case len(filename) > 4 && filename[len(filename)-4:] == ".bin":

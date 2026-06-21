@@ -73,10 +73,6 @@ func (b *ConfigBuilder) Build() *Config {
 	return b.cfg
 }
 
-func (b *ConfigBuilder) ToYAML() ([]byte, error) {
-	return b.cfg.ToYAML()
-}
-
 func (b *ConfigBuilder) ToJSON() ([]byte, error) {
 	return b.cfg.ToJSON()
 }

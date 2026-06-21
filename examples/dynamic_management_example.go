@@ -14,7 +14,7 @@ import (
 	"github.com/oarkflow/authz/stores"
 )
 
-func main() {
+func mai2n() {
 	// 1. Initialize Engine with in-memory stores, including TenantStore
 	policyStore := stores.NewMemoryPolicyStore()
 	roleStore := stores.NewMemoryRoleStore()

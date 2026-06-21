@@ -507,9 +507,6 @@ func loadConfig(filename string) (*authz.Config, error) {
 	case ".authz", ".dsl":
 		parser := authz.NewDSLParser()
 		cfg, err = parser.ParseFile(filename)
-	case ".yaml", ".yml":
-		loader := authz.NewConfigLoader()
-		cfg, err = loader.LoadYAML(data)
 	case ".json":
 		loader := authz.NewConfigLoader()
 		cfg, err = loader.LoadJSON(data)
@@ -536,8 +533,6 @@ func saveConfig(cfg *authz.Config, filename string) error {
 	case ".authz", ".dsl":
 		encoder := authz.NewDSLEncoder()
 		data, err = encoder.Encode(cfg)
-	case ".yaml", ".yml":
-		data, err = cfg.ToYAML()
 	case ".json":
 		data, err = cfg.ToJSON()
 	case ".bin":

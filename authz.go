@@ -1538,7 +1538,7 @@ func NewEngine(
 		attrCache:        make(map[string]*attrCacheEntry),
 		attrCacheTTL:     5 * time.Second,
 
-		logger:             logger.NewPhusluLogger(),
+		logger:             logger.NewSLogLogger(nil),
 		traceIDFunc:        func() string { return fmt.Sprintf("%d", time.Now().UnixNano()) },
 		auditCh:            make(chan AuditEntry, 4096),
 		auditBatchSize:     64,

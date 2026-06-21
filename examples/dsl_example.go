@@ -13,7 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func main() {
+func mai1n() {
 	fmt.Println("=== AuthZ Custom DSL Demo ===\n")
 
 	// Example 1: Parse DSL
