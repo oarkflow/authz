@@ -1,5 +1,6 @@
 package middleware
 
+/*
 import (
 	"net/http"
 	"strings"
@@ -121,3 +122,4 @@ func ChiResourceFromPath() ResourceExtractor {
 		return res
 	}
 }
+*/

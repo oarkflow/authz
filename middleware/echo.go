@@ -1,5 +1,6 @@
 package middleware
 
+/*
 import (
 	"net/http"
 	"strings"
@@ -253,3 +254,4 @@ func EchoRequireRoles(engine *authz.Engine, roles ...string) echo.MiddlewareFunc
 	}
 	return EchoWithConfig(cfg)
 }
+*/

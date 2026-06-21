@@ -26,7 +26,7 @@ all: authz-ext-dev
 authz-ext-build:
 	cd $(EXT_DIR) && $(PNPM) exec $(VSCE) package --allow-missing-repository --no-dependencies
 
-authz-ext-install: authz-ext-build
+install-extension: authz-ext-build
 	$(CODE) --install-extension $(VSIX) --force
 
 authz-ext-open:

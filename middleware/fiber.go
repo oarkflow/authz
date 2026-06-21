@@ -1,5 +1,6 @@
 package middleware
 
+/*
 import (
 	"strings"
 	"time"
@@ -258,3 +259,4 @@ func FiberDecision(c fiber.Ctx) *authz.Decision {
 }
 
 // fiber:context-methods migrated
+*/
