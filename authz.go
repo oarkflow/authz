@@ -951,12 +951,12 @@ func compileToBytecode(e Expr) *Bytecode {
 		return &Bytecode{ops: []OpCode{OP_TRUE}}
 	case *EqExpr:
 		// if RHS is a field reference (subject./resource./env.) treat as PUSH_FIELD
-		if rv, ok := v.Value.(string); ok && (rv == "action" || (len(rv) > 4 && (rv[:8] == "subject." || rv[:9] == "resource." || rv[:4] == "env."))) {
+		if rv, ok := v.Value.(string); ok && (rv == "action" || strings.HasPrefix(rv, "subject.") || strings.HasPrefix(rv, "resource.") || strings.HasPrefix(rv, "env.")) {
 			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_EQ}, args: []interface{}{v.Field, rv}}
 		}
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_EQ}, args: []interface{}{v.Field, v.Value}}
 	case *NeExpr:
-		if rv, ok := v.Value.(string); ok && (rv == "action" || (len(rv) > 4 && (rv[:8] == "subject." || rv[:9] == "resource." || rv[:4] == "env."))) {
+		if rv, ok := v.Value.(string); ok && (rv == "action" || strings.HasPrefix(rv, "subject.") || strings.HasPrefix(rv, "resource.") || strings.HasPrefix(rv, "env.")) {
 			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_NE}, args: []interface{}{v.Field, rv}}
 		}
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_NE}, args: []interface{}{v.Field, v.Value}}
@@ -965,7 +965,7 @@ func compileToBytecode(e Expr) *Bytecode {
 		copy(vals, v.Values)
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_IN}, args: []interface{}{v.Field, vals}}
 	case *GteExpr:
-		if rv, ok := v.Value.(string); ok && (rv == "action" || (len(rv) > 4 && (rv[:8] == "subject." || rv[:9] == "resource." || rv[:4] == "env."))) {
+		if rv, ok := v.Value.(string); ok && (rv == "action" || strings.HasPrefix(rv, "subject.") || strings.HasPrefix(rv, "resource.") || strings.HasPrefix(rv, "env.")) {
 			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_GTE}, args: []interface{}{v.Field, rv}}
 		}
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_GTE}, args: []interface{}{v.Field, v.Value}}
