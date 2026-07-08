@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/middleware"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/middleware"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
 func TestConfigAuthzHTTPRouteServer(t *testing.T) {

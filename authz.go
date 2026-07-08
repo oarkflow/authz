@@ -19,8 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/oarkflow/authz/logger"
-	"github.com/oarkflow/authz/utils"
+	"github.com/oarkflow/authz/pkg/logger"
+	"github.com/oarkflow/authz/pkg/utils"
 )
 
 // ============================================================================

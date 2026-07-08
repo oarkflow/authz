@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/oarkflow/authz/utils"
+	"github.com/oarkflow/authz/pkg/utils"
 )
 
 // EffectivePermission represents a resolved permission with its source

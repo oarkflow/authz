@@ -494,9 +494,9 @@ package main
 import (
     "context"
     "os"
-    
+
     "github.com/oarkflow/authz"
-    "github.com/oarkflow/authz/stores"
+    "github.com/oarkflow/authz/pkg/stores"
 )
 
 func main() {
@@ -504,7 +504,7 @@ func main() {
     data, _ := os.ReadFile("config.authz")
     parser := authz.NewDSLParser()
     cfg, _ := parser.Parse(data)
-    
+
     // Create engine
     engine := authz.NewEngine(
         stores.NewMemoryPolicyStore(),
@@ -512,7 +512,7 @@ func main() {
         stores.NewMemoryACLStore(),
         stores.NewMemoryAuditStore(),
     )
-    
+
     // Apply configuration
     ctx := context.Background()
     engine.ApplyConfig(ctx, cfg)

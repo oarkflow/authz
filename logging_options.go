@@ -1,6 +1,6 @@
 package authz
 
-import "github.com/oarkflow/authz/logger"
+import "github.com/oarkflow/authz/pkg/logger"
 
 // Logger is re-exported for backwards compatibility.
 type Logger = logger.Logger

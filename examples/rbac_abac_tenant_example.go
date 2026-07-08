@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/logger"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/logger"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
 func mai6n() {

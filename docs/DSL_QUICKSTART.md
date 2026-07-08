@@ -39,7 +39,7 @@ import (
     "time"
 
     "github.com/oarkflow/authz"
-    "github.com/oarkflow/authz/stores"
+    "github.com/oarkflow/authz/pkg/stores"
 )
 
 func main() {
@@ -66,20 +66,20 @@ func main() {
 
     // Test authorization
     alice := &authz.Subject{
-        ID: "user:alice", 
-        Type: "user", 
+        ID: "user:alice",
+        Type: "user",
         TenantID: "myapp",
         Roles: []string{"admin"},
     }
-    
+
     doc := &authz.Resource{
-        ID: "doc1", 
-        Type: "document", 
+        ID: "doc1",
+        Type: "document",
         TenantID: "myapp",
     }
-    
+
     env := &authz.Environment{
-        Time: time.Now(), 
+        Time: time.Now(),
         TenantID: "myapp",
     }
 

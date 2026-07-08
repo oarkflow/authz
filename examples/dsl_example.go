@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
 func mai1n() {

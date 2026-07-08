@@ -7,7 +7,7 @@ import (
 	"time"
 
 	authz "github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
 func TestPolicyBundleDistributorPublishesBundles(t *testing.T) {

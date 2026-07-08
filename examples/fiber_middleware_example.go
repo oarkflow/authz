@@ -9,13 +9,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/logger"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/logger"
+	"github.com/oarkflow/authz/pkg/stores"
+	fiber "github.com/oarkflow/fh"
 )
 
-func mai3n() {
+func main() {
 	ctx := context.Background()
 
 	policyStore := stores.NewMemoryPolicyStore()

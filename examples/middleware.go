@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gofiber/fiber/v3"
 	"github.com/oarkflow/authz"
+	fiber "github.com/oarkflow/fh"
 )
 
 // FiberAuthOptions configures the behavior of the Fiber authorization middleware.

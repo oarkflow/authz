@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	authz "github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
 func newEmptyEngine(t *testing.T) *authz.Engine {

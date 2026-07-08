@@ -9,7 +9,7 @@ import (
 
 	"github.com/oarkflow/authz"
 	"github.com/oarkflow/authz/contrib/sqldriver"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/stores"
 	"github.com/oarkflow/squealx/drivers/sqlite"
 )
 

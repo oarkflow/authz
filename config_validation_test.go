@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
 func TestValidateConfigRejectsSemanticErrors(t *testing.T) {

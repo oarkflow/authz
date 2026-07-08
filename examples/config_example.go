@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/pkg/stores"
 )
 
-func main() {
+func mai3n() {
 	// Example 1: Build configuration programmatically
 	buildConfigExample()
 
