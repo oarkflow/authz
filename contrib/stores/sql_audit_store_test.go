@@ -2,30 +2,28 @@ package stores
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/squealx"
-	_ "modernc.org/sqlite"
+	corestores "github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/squealx/drivers/sqlite"
 )
 
 func TestSQLAuditStoreTraceIDRoundtrip(t *testing.T) {
-	// setup in-memory sqlite
-	sqlDB, err := sql.Open("sqlite", ":memory:")
+	db, err := sqlite.Open(":memory:", "sqlite")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	defer sqlDB.Close()
-	db := squealx.NewDb(sqlDB, "sqlite", "testdb")
-
-	// run migrations
-	if err := Migrate(db); err != nil {
+	defer db.Close()
+	if err := corestores.Migrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	store, _ := NewSQLAuditStore(db)
+	store, err := corestores.NewSQLAuditStore(db)
+	if err != nil {
+		t.Fatalf("new audit store: %v", err)
+	}
 
 	entry := &authz.AuditEntry{
 		ID:        "evt-1",

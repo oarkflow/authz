@@ -2,3 +2,9 @@
 .gomodcache
 node_modules
 *.vsix
+coverage.out
+coverage.html
+*.xml
+.sarif
+*.prof
+*.test

@@ -47,9 +47,6 @@ type EngineConfig struct {
 	AuditBatchSize      int   `json:"audit_batch_size" yaml:"audit_batch_size"`
 	AuditFlushInterval  int64 `json:"audit_flush_interval_ms" yaml:"audit_flush_interval_ms"`
 	BatchWorkerCount    int   `json:"batch_worker_count" yaml:"batch_worker_count"`
-	RistrettoNumCounter int64 `json:"ristretto_num_counter" yaml:"ristretto_num_counter"`
-	RistrettoMaxCost    int64 `json:"ristretto_max_cost" yaml:"ristretto_max_cost"`
-	RistrettoBuffer     int64 `json:"ristretto_buffer" yaml:"ristretto_buffer"`
 }
 
 // ConfigLoader loads configuration from various formats
@@ -105,10 +102,6 @@ func (e *Engine) ApplyConfig(ctx context.Context, cfg *Config) error {
 	if cfg.Engine.BatchWorkerCount > 0 {
 		e.batchWorkerCount = cfg.Engine.BatchWorkerCount
 	}
-	if cfg.Engine.RistrettoNumCounter > 0 {
-		_ = e.ConfigureRistrettoDecisionCache(cfg.Engine.RistrettoNumCounter, cfg.Engine.RistrettoMaxCost, cfg.Engine.RistrettoBuffer)
-	}
-
 	// Apply tenant hierarchy
 	if len(cfg.Hierarchy) > 0 && e.tenantResolver == nil {
 		resolver := NewMemoryTenantResolver()
@@ -479,9 +472,6 @@ func encodeEngineConfig(buf *bytes.Buffer, cfg *EngineConfig) {
 	binary.Write(buf, binary.LittleEndian, int32(cfg.AuditBatchSize))
 	binary.Write(buf, binary.LittleEndian, cfg.AuditFlushInterval)
 	binary.Write(buf, binary.LittleEndian, int32(cfg.BatchWorkerCount))
-	binary.Write(buf, binary.LittleEndian, cfg.RistrettoNumCounter)
-	binary.Write(buf, binary.LittleEndian, cfg.RistrettoMaxCost)
-	binary.Write(buf, binary.LittleEndian, cfg.RistrettoBuffer)
 }
 
 func decodeEngineConfig(data []byte) EngineConfig {
@@ -496,9 +486,6 @@ func decodeEngineConfig(data []byte) EngineConfig {
 	var wc int32
 	binary.Read(r, binary.LittleEndian, &wc)
 	cfg.BatchWorkerCount = int(wc)
-	binary.Read(r, binary.LittleEndian, &cfg.RistrettoNumCounter)
-	binary.Read(r, binary.LittleEndian, &cfg.RistrettoMaxCost)
-	binary.Read(r, binary.LittleEndian, &cfg.RistrettoBuffer)
 	return cfg
 }
 

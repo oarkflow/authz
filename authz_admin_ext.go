@@ -746,6 +746,10 @@ func (s *ExtendedAdminServer) handleWebhooks(w http.ResponseWriter, r *http.Requ
 				respondError(w, http.StatusBadRequest, errors.New("url required"))
 				return
 			}
+			if err := ValidateWebhookURL(wh.URL); err != nil {
+				respondError(w, http.StatusBadRequest, err)
+				return
+			}
 			wh.Enabled = true
 			now := time.Now()
 			wh.CreatedAt = now
@@ -780,6 +784,12 @@ func (s *ExtendedAdminServer) handleWebhooks(w http.ResponseWriter, r *http.Requ
 		wh.ID = whID
 		wh.TenantID = tenantID
 		wh.UpdatedAt = time.Now()
+		if wh.URL != "" {
+			if err := ValidateWebhookURL(wh.URL); err != nil {
+				respondError(w, http.StatusBadRequest, err)
+				return
+			}
+		}
 		if err := s.webhookStore.UpdateWebhook(r.Context(), &wh); err != nil {
 			respondError(w, http.StatusInternalServerError, err)
 			return
@@ -931,7 +941,7 @@ func (s *ExtendedAdminServer) handleAuthLogin(w http.ResponseWriter, r *http.Req
 	// Create session if store available
 	if s.sessionStore != nil {
 		sess := &Session{
-			ID:           fmt.Sprintf("sess_%d", time.Now().UnixNano()),
+			ID:           GenerateSecureID("sess"),
 			UserID:       user.ID,
 			TenantID:     user.TenantID,
 			RefreshToken: pair.RefreshToken,
@@ -946,7 +956,7 @@ func (s *ExtendedAdminServer) handleAuthLogin(w http.ResponseWriter, r *http.Req
 	// Dispatch login event
 	if s.eventDispatcher != nil {
 		_ = s.eventDispatcher.Dispatch(r.Context(), &Event{
-			ID:       fmt.Sprintf("evt_%d", time.Now().UnixNano()),
+			ID:       GenerateSecureID("evt"),
 			TenantID: user.TenantID,
 			Type:     EventUserLogin,
 			ActorID:  user.ID,

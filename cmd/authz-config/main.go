@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +9,7 @@ import (
 
 	"github.com/oarkflow/authz"
 	"github.com/oarkflow/authz/stores"
-	"github.com/oarkflow/squealx"
-	_ "modernc.org/sqlite"
+	"github.com/oarkflow/squealx/drivers/sqlite"
 )
 
 func main() {
@@ -346,18 +344,18 @@ func newCLIEngine(sqlitePath string) (*authz.Engine, authz.ConfigIAMStores, func
 		)
 		return engine, authz.ConfigIAMStores{Users: userStore, Groups: groupStore, Scopes: scopeStore, ServiceAccounts: saStore, Invitations: invStore, APIKeys: apiKeyStore, PermissionBoundaries: boundaryStore}, func() {}, nil
 	}
-	sqlDB, err := sql.Open("sqlite", sqlitePath)
+	db, err := sqlite.Open(sqlitePath, "sqlite")
 	if err != nil {
 		return nil, authz.ConfigIAMStores{}, nil, err
 	}
-	db := squealx.NewDb(sqlDB, "sqlite", "authz")
+	defer func() {
+		db.Close()
+	}()
 	if err := stores.Migrate(db); err != nil {
-		sqlDB.Close()
 		return nil, authz.ConfigIAMStores{}, nil, err
 	}
 	auditStore, err := stores.NewSQLAuditStore(db)
 	if err != nil {
-		sqlDB.Close()
 		return nil, authz.ConfigIAMStores{}, nil, err
 	}
 	engine := authz.NewEngine(
@@ -377,7 +375,7 @@ func newCLIEngine(sqlitePath string) (*authz.Engine, authz.ConfigIAMStores, func
 		APIKeys:              stores.NewSQLAPIKeyStore(db),
 		PermissionBoundaries: stores.NewSQLPermissionBoundaryStore(db),
 	}
-	return engine, iamStores, func() { sqlDB.Close() }, nil
+	return engine, iamStores, func() { db.Close() }, nil
 }
 
 func printPlan(plan *authz.ConfigApplyPlan) {

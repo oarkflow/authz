@@ -2,9 +2,11 @@ package authz
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -39,12 +41,22 @@ func (e *Engine) ExplainRequest(ctx context.Context, req *ExplainRequest) (*Deci
 	return e.Explain(ctx, sub, Action(req.Action), res, env)
 }
 
-// AdminHTTPServer exposes tenant-scoped management APIs over HTTP.
+// AdminHTTPServer exposes tenant-scoped management APIs over HTTP with security hardening.
 type AdminHTTPServer struct {
-	engine *Engine
-	mux    *http.ServeMux
-	authFn AdminAuthFunc
-	server *http.Server
+	engine             *Engine
+	mux                *http.ServeMux
+	authFn             AdminAuthFunc
+	server             *http.Server
+	handler            http.Handler
+	tlsConfig          *tls.Config
+	tlsCertFile        string
+	tlsKeyFile         string
+	securityHeadersCfg *SecurityHeadersConfig
+	corsCfg            *CORSConfig
+	csrfCfg            *CSRFConfig
+	rateLimiter        *RateLimiter
+	contentTypeCfg     *ContentTypeConfig
+	maxBodySize        int64
 }
 
 // AdminAuthFunc allows callers to enforce authentication/authorization on admin endpoints.
@@ -54,26 +66,140 @@ type AdminAuthFunc func(r *http.Request) error
 type AdminHTTPOption func(*AdminHTTPServer)
 
 // WithAdminAuth installs a custom authentication callback.
+// If not provided, the server will warn and require auth by default.
 func WithAdminAuth(fn AdminAuthFunc) AdminHTTPOption {
 	return func(s *AdminHTTPServer) {
 		s.authFn = fn
 	}
 }
 
+// WithAdminTLS configures TLS for the admin HTTP server.
+func WithAdminTLS(certFile, keyFile string) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.tlsCertFile = certFile
+		s.tlsKeyFile = keyFile
+	}
+}
+
+// WithAdminTLSConfig configures a custom TLS configuration.
+func WithAdminTLSConfig(cfg *tls.Config) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.tlsConfig = cfg
+	}
+}
+
+// WithAdminSecurityHeaders configures security headers for the admin server.
+// If nil, defaults are used.
+func WithAdminSecurityHeaders(cfg *SecurityHeadersConfig) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.securityHeadersCfg = cfg
+	}
+}
+
+// WithAdminCORS configures CORS for the admin server.
+// If nil, CORS is not enabled.
+func WithAdminCORS(cfg *CORSConfig) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.corsCfg = cfg
+	}
+}
+
+// WithAdminCSRF configures CSRF protection for the admin server.
+// If nil, defaults are used.
+func WithAdminCSRF(cfg *CSRFConfig) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.csrfCfg = cfg
+	}
+}
+
+// WithAdminRateLimiter configures rate limiting for the admin server.
+// If nil, defaults are used.
+func WithAdminRateLimiter(cfg *RateLimiterConfig) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.rateLimiter = NewRateLimiter(cfg)
+	}
+}
+
+// WithAdminContentTypeEnforcement configures content-type enforcement.
+// If nil, defaults are used.
+func WithAdminContentTypeEnforcement(cfg *ContentTypeConfig) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.contentTypeCfg = cfg
+	}
+}
+
+// WithAdminMaxBodySize sets the maximum request body size in bytes for admin endpoints.
+// Default: 1MB (1048576 bytes)
+func WithAdminMaxBodySize(maxBytes int64) AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.maxBodySize = maxBytes
+	}
+}
+
 // NewAdminHTTPServer wires handlers for managing policies, roles, batch decisions, and explanations.
+// Security middleware is automatically applied. Admin authentication is required by default;
+// a warning is logged if no auth function is provided.
 func NewAdminHTTPServer(engine *Engine, opts ...AdminHTTPOption) *AdminHTTPServer {
 	if engine == nil {
 		panic("engine is required")
 	}
 	server := &AdminHTTPServer{
-		engine: engine,
-		mux:    http.NewServeMux(),
+		engine:      engine,
+		mux:         http.NewServeMux(),
+		maxBodySize: 1 << 20, // 1MB default
 	}
 	for _, opt := range opts {
 		opt(server)
 	}
+
+	// Warn if no auth function is provided
+	if server.authFn == nil {
+		log.Println("[WARN] AdminHTTPServer: no authentication configured via WithAdminAuth(). " +
+			"This is a security risk. Consider adding authentication for production use.")
+	}
+
 	server.routes()
+	server.buildHandler()
 	return server
+}
+
+func (s *AdminHTTPServer) buildHandler() {
+	var h http.Handler = s.mux
+
+	// Request ID (innermost, first applied)
+	h = RequestIDMiddleware(h)
+
+	// Max body size
+	if s.maxBodySize > 0 {
+		h = MaxBodySize(s.maxBodySize)(h)
+	}
+
+	// Content-Type enforcement (opt-in via WithAdminContentTypeEnforcement)
+	if s.contentTypeCfg != nil {
+		h = ContentTypeMiddleware(s.contentTypeCfg)(h)
+	}
+
+	// Rate limiting (opt-in via WithAdminRateLimiter)
+	if s.rateLimiter != nil {
+		h = RateLimitMiddleware(s.rateLimiter)(h)
+	}
+
+	// CSRF protection (opt-in via WithAdminCSRF)
+	if s.csrfCfg != nil {
+		h = CSRFMiddleware(s.csrfCfg)(h)
+	}
+
+	// CORS (opt-in via WithAdminCORS)
+	if s.corsCfg != nil {
+		h = CORSMiddleware(s.corsCfg)(h)
+	}
+
+	// Security headers (opt-in via WithAdminSecurityHeaders)
+	if s.securityHeadersCfg != nil {
+		h = SecurityHeadersMiddleware(s.securityHeadersCfg)(h)
+	}
+
+	s.handler = h
 }
 
 func (s *AdminHTTPServer) routes() {
@@ -82,19 +208,38 @@ func (s *AdminHTTPServer) routes() {
 	s.mux.HandleFunc("/tenants/", s.handleTenants)
 }
 
-// Handler returns the underlying HTTP handler for embedding.
+// Handler returns the underlying HTTP handler with all security middleware applied.
 func (s *AdminHTTPServer) Handler() http.Handler {
-	return s.mux
+	return s.handler
 }
 
-// ServeHTTP satisfies http.Handler.
+// ServeHTTP satisfies http.Handler with all security middleware applied.
 func (s *AdminHTTPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.mux.ServeHTTP(w, r)
+	s.handler.ServeHTTP(w, r)
 }
 
-// Start begins serving on the provided address.
+// Start begins serving on the provided address with optional TLS.
 func (s *AdminHTTPServer) Start(addr string) error {
-	s.server = &http.Server{Addr: addr, Handler: s.mux}
+	s.server = &http.Server{
+		Addr:    addr,
+		Handler: s.handler,
+		TLSConfig: func() *tls.Config {
+			if s.tlsConfig != nil {
+				return s.tlsConfig
+			}
+			// Return minimal secure defaults
+			return &tls.Config{
+				MinVersion:               tls.VersionTLS12,
+				PreferServerCipherSuites: true,
+			}
+		}(),
+	}
+
+	if s.tlsCertFile != "" && s.tlsKeyFile != "" {
+		log.Printf("[INFO] AdminHTTPServer starting with TLS on %s", addr)
+		return s.server.ListenAndServeTLS(s.tlsCertFile, s.tlsKeyFile)
+	}
+	log.Printf("[INFO] AdminHTTPServer starting without TLS on %s (recommend using WithAdminTLS for production)", addr)
 	return s.server.ListenAndServe()
 }
 
@@ -253,7 +398,7 @@ func (s *AdminHTTPServer) handlePolicies(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if policy.ID == "" {
-			policy.ID = fmt.Sprintf("policy-%d", time.Now().UnixNano())
+			policy.ID = GenerateSecureID("policy")
 		}
 		if err := s.engine.CreatePolicy(r.Context(), policy); err != nil {
 			respondError(w, http.StatusInternalServerError, err)
@@ -336,7 +481,7 @@ func (s *AdminHTTPServer) handleRoles(w http.ResponseWriter, r *http.Request, te
 		}
 		role := payload.toRole(tenantID)
 		if role.ID == "" {
-			role.ID = fmt.Sprintf("role-%d", time.Now().UnixNano())
+			role.ID = GenerateSecureID("role")
 		}
 		if err := s.engine.CreateRole(r.Context(), role); err != nil {
 			respondError(w, http.StatusInternalServerError, err)
@@ -556,7 +701,7 @@ func (s *AdminHTTPServer) handleACLs(w http.ResponseWriter, r *http.Request, ten
 			return
 		}
 		if acl.ID == "" {
-			acl.ID = fmt.Sprintf("acl-%d", time.Now().UnixNano())
+			acl.ID = GenerateSecureID("acl")
 		}
 		acl.TenantID = tenantID
 		if err := s.engine.GrantACL(r.Context(), &acl); err != nil {

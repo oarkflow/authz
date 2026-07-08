@@ -187,6 +187,3 @@ engine:
   audit_batch_size: 128
   audit_flush_interval_ms: 50
   batch_worker_count: 8
-  ristretto_num_counter: 65536
-  ristretto_max_cost: 4194304
-  ristretto_buffer: 64

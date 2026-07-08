@@ -8,6 +8,10 @@ SAMPLE ?= examples/config.authz
 VERSION := $(shell node -p "require('./$(EXT_DIR)/package.json').version")
 VSIX := $(EXT_DIR)/authz-dsl-$(VERSION).vsix
 
+# Security tooling
+GOSEC ?= gosec
+GOVULNCHECK ?= govulncheck
+
 ifeq ($(OS),Windows_NT)
 HOST_OS := windows
 else
@@ -56,3 +60,36 @@ authz-ext-dev: authz-ext-install authz-ext-open authz-ext-reload
 
 authz-ext-status:
 	$(CODE) --list-extensions --show-versions | node -e "const fs=require('fs'); const id='$(EXT_ID)@'; const line=fs.readFileSync(0,'utf8').split(/\r?\n/).find((entry)=>entry.startsWith(id)); if (line) console.log(line);"
+
+# ============================================================================
+# SECURITY TARGETS
+# ============================================================================
+
+.PHONY: security-scan vulncheck deps-audit security-all
+
+# Run SAST scanning with gosec
+security-scan:
+	@echo "Running gosec SAST scan..."
+	$(GOSEC) -quiet -exclude-dir=vscode-authz ./...
+
+# Run vulnerability check with govulncheck
+vulncheck:
+	@echo "Running govulncheck..."
+	$(GOVULNCHECK) ./...
+
+# Audit Go dependencies for known vulnerabilities
+deps-audit:
+	@echo "Checking dependencies for vulnerabilities..."
+	go list -json -m all | $(GOVULNCHECK) -tool=govulncheck -mode=json || echo "govulncheck not available, install with: go install golang.org/x/vuln/cmd/govulncheck@latest"
+
+# Run all security checks
+security-all: security-scan vulncheck
+
+# Check for secrets in the repository
+secrets-check:
+	@echo "Checking for secrets in repository..."
+	@if command -v gitleaks >/dev/null 2>&1; then \
+		gitleaks detect --verbose; \
+	else \
+		echo "gitleaks not installed. Install with: brew install gitleaks"; \
+	fi

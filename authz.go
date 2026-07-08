@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
@@ -15,15 +16,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oarkflow/authz/logger"
 	"github.com/oarkflow/authz/utils"
-
-	"log"
-
-	ristretto "github.com/dgraph-io/ristretto"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // ============================================================================
@@ -47,6 +44,7 @@ type Resource struct {
 	TenantID string         `json:"tenant_id"`
 	OwnerID  string         `json:"owner_id"`
 	Attrs    map[string]any `json:"attrs"`
+	Key      string         `json:"-"` // pre-computed "type:id" to avoid repeated concat
 }
 
 // Action represents how the resource is being accessed
@@ -1019,11 +1017,11 @@ type PolicyIndex struct {
 	compiledCache       map[string]*CompiledPolicy // key: policyID:checksum
 	lastCompiled        time.Time
 	actionResourceIndex map[string][]*CompiledPolicy
-	candidateCache      *ristretto.Cache
+	candidateCache      Cache
 }
 
 func NewPolicyIndex() *PolicyIndex {
-	idx := &PolicyIndex{
+	return &PolicyIndex{
 		byAction:            make(map[Action][]*CompiledPolicy),
 		byResourceType:      make(map[string][]*CompiledPolicy),
 		byTenant:            make(map[string][]*CompiledPolicy),
@@ -1032,10 +1030,6 @@ func NewPolicyIndex() *PolicyIndex {
 		compiledCache:       make(map[string]*CompiledPolicy),
 		actionResourceIndex: make(map[string][]*CompiledPolicy),
 	}
-	if cache, err := ristretto.NewCache(&ristretto.Config{NumCounters: 1 << 16, MaxCost: 1 << 22, BufferItems: 64}); err == nil {
-		idx.candidateCache = cache
-	}
-	return idx
 }
 
 func (idx *PolicyIndex) Rebuild(policies []*Policy) {
@@ -1211,7 +1205,10 @@ func (idx *PolicyIndex) GetRelevantPolicies(action Action, resource *Resource, t
 	resourceKey := ""
 	hasResource := false
 	if resource != nil {
-		resourceKey = resource.Type + ":" + resource.ID
+		resourceKey = resource.Key
+		if resourceKey == "" {
+			resourceKey = resource.Type + ":" + resource.ID
+		}
 		hasResource = resource.Type != "" || resource.ID != ""
 	}
 	cacheKey := fmt.Sprintf("%s|%s|%s", tenantID, string(action), resourceKey)
@@ -1450,8 +1447,8 @@ type Engine struct {
 	attrCache    map[string]*attrCacheEntry
 	attrCacheMu  sync.RWMutex
 	attrCacheTTL time.Duration
-	// optional Ristretto cache for decisions
-	ristCache       *ristretto.Cache
+	// optional cache for decisions (default nil/NoopCache)
+	cache           Cache
 	decisionCacheMu sync.RWMutex
 	tenantResolver  TenantResolver
 	// logger for structured logs (pluggable)
@@ -1465,15 +1462,25 @@ type Engine struct {
 	auditBatchSize     int
 	auditFlushInterval time.Duration
 	batchWorkerCount   int
-	// OpenTelemetry instrumentation (optional)
-	otel *otelInstrumentation
+	// hot-path sequence counter for cheap trace/audit IDs
+	hotPathSeq atomic.Uint64
+	// observer for tracing/metrics (default NoopObserver)
+	observer Observer
 }
 
 type EngineOption func(*Engine) error
 
-func WithRistretto(numCounters int64, maxCost int64, bufferItems int64) EngineOption {
+func WithCache(c Cache) EngineOption {
 	return func(e *Engine) error {
-		return e.ConfigureRistrettoDecisionCache(numCounters, maxCost, bufferItems)
+		e.cache = c
+		return nil
+	}
+}
+
+func WithObserver(o Observer) EngineOption {
+	return func(e *Engine) error {
+		e.observer = o
+		return nil
 	}
 }
 
@@ -1539,11 +1546,12 @@ func NewEngine(
 		attrCacheTTL:     5 * time.Second,
 
 		logger:             logger.NewSLogLogger(nil),
-		traceIDFunc:        func() string { return fmt.Sprintf("%d", time.Now().UnixNano()) },
+		traceIDFunc:        func() string { return GenerateSecureID("trace") },
 		auditCh:            make(chan AuditEntry, 4096),
 		auditBatchSize:     64,
 		auditFlushInterval: 25 * time.Millisecond,
 		batchWorkerCount:   runtime.NumCPU(),
+		observer:           NoopObserver{},
 	}
 
 	// init pools
@@ -1587,51 +1595,35 @@ func (e *Engine) Authorize(ctx context.Context, subject *Subject, action Action,
 // internal authorize with option to include trace (explain)
 func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action Action, resource *Resource, env *Environment, includeTrace bool) (*Decision, error) {
 	start := time.Now()
-	var cacheHit bool
-
-	decision := &Decision{
-		Allowed:   false,
-		Trace:     make([]string, 0),
-		Timestamp: start,
-	}
-
-	// Start OTel span if instrumentation is enabled
-	if e.otel != nil && e.otel.enabled && e.otel.config.EnableTracing {
-		var span trace.Span
-		ctx, span = e.otel.startSpan(ctx, "authz.authorize", subject, action, resource)
-		if span != nil {
-			defer func() {
-				e.otel.setSpanDecision(span, decision)
-				span.End()
-			}()
-		}
-	}
-
-	// Defer OTel metrics recording
-	defer func() {
-		if e.otel != nil {
-			e.otel.recordDecision(ctx, subject, action, resource, decision, time.Since(start), cacheHit)
-		}
-	}()
 
 	// Multi-tenancy enforcement
 	// default behavior: subject and resource must be in same tenant
 	if e.tenantResolver == nil {
 		if subject.TenantID != env.TenantID || resource.TenantID != env.TenantID {
+			decision := &Decision{
+				Allowed:   false,
+				Trace:     make([]string, 0),
+				Timestamp: start,
+				Reason:    "tenant mismatch",
+			}
 			if includeTrace {
 				decision.Trace = append(decision.Trace, "DENY: tenant isolation violation")
 			}
-			decision.Reason = "tenant mismatch"
 			e.auditLog(ctx, subject, action, resource, decision)
 			return decision, nil
 		}
 	} else {
 		// Resource tenant must match the environment tenant
 		if resource.TenantID != env.TenantID {
+			decision := &Decision{
+				Allowed:   false,
+				Trace:     make([]string, 0),
+				Timestamp: start,
+				Reason:    "resource tenant mismatch",
+			}
 			if includeTrace {
 				decision.Trace = append(decision.Trace, "DENY: resource tenant != env tenant")
 			}
-			decision.Reason = "resource tenant mismatch"
 			e.auditLog(ctx, subject, action, resource, decision)
 			return decision, nil
 		}
@@ -1639,23 +1631,56 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 		// owners can have action-scoped privileges and cross-tenant admins have full rights.
 		subjectOk := subject.TenantID == env.TenantID || e.tenantResolver.IsAncestor(subject.TenantID, env.TenantID) || e.isTenantOwnerForAction(ctx, subject, env.TenantID, action, resource) || e.isCrossTenantAdmin(ctx, subject)
 		if !subjectOk {
+			decision := &Decision{
+				Allowed:   false,
+				Trace:     make([]string, 0),
+				Timestamp: start,
+				Reason:    "subject tenant not authorized",
+			}
 			if includeTrace {
 				decision.Trace = append(decision.Trace, "DENY: subject tenant not authorized for env tenant")
 			}
-			decision.Reason = "subject tenant not authorized"
 			e.auditLog(ctx, subject, action, resource, decision)
 			return decision, nil
 		}
 	}
 
 	// Decision cache lookup first (fast path avoids attribute enrichment)
+	// No decision allocation needed on cache hit
 	ck := e.buildCacheKey(subject, action, resource, env)
 	if !includeTrace {
 		if cached, ok := e.getDecisionFromCache(ck); ok {
-			cacheHit = true
 			return cached, nil
 		}
 	}
+
+	// Cache miss - allocate decision
+	decision := &Decision{
+		Allowed:   false,
+		Trace:     make([]string, 0),
+		Timestamp: start,
+	}
+
+	// Start span if observer is enabled
+	if e.observer.Enabled() {
+		var span Span
+		ctx, span = e.observer.StartSpan(ctx, "authz.authorize")
+		if span != nil {
+			defer func() {
+				span.SetAttributes(
+					ObserverAttr{Key: "allowed", Value: decision.Allowed},
+					ObserverAttr{Key: "reason", Value: decision.Reason},
+					ObserverAttr{Key: "matched_by", Value: decision.MatchedBy},
+				)
+				span.End()
+			}()
+		}
+	}
+
+	// Defer metrics recording
+	defer func() {
+		e.observer.RecordDecision(ctx, subject, action, resource, decision, time.Since(start))
+	}()
 
 	// Enrich subject attributes from external providers (cached)
 	if attrs, err := e.getAttributes(ctx, subject); err == nil && attrs != nil {
@@ -2021,7 +2046,10 @@ func (e *Engine) checkACL(ctx context.Context, subject *Subject, resource *Resou
 	acls2, _ := e.aclStore.ListACLsByResource(ctx, resource.ID)
 	acls1 := make([]*ACL, 0)
 	if len(acls2) == 0 {
-		resourceKey := resource.Type + ":" + resource.ID
+		resourceKey := resource.Key
+		if resourceKey == "" {
+			resourceKey = resource.Type + ":" + resource.ID
+		}
 		acls1, _ = e.aclStore.ListACLsByResource(ctx, resourceKey)
 	}
 
@@ -2089,7 +2117,10 @@ func (e *Engine) checkACLFast(ctx context.Context, subject *Subject, resource *R
 	acls2, _ := e.aclStore.ListACLsByResource(ctx, resource.ID)
 	acls1 := make([]*ACL, 0)
 	if len(acls2) == 0 {
-		resourceKey := resource.Type + ":" + resource.ID
+		resourceKey := resource.Key
+		if resourceKey == "" {
+			resourceKey = resource.Type + ":" + resource.ID
+		}
 		acls1, _ = e.aclStore.ListACLsByResource(ctx, resourceKey)
 	}
 	proc := func(acl *ACL) (bool, string, bool) {
@@ -2478,36 +2509,33 @@ func matchResource(pattern string, resource *Resource) bool {
 	}
 
 	// Generic patterns: compare against "type:id" value using MatchResource utilities
-	val := resource.Type + ":" + resource.ID
+	val := resource.Key
+	if val == "" {
+		val = resource.Type + ":" + resource.ID
+	}
 	return utils.MatchResource(val, pattern)
 }
 
 func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, resource *Resource, decision *Decision) {
-	// Generate a trace id for this audit event (pluggable)
-	traceID := ""
-	if e.traceIDFunc != nil {
-		traceID = e.traceIDFunc()
-	} else {
-		traceID = fmt.Sprintf("%d", time.Now().UnixNano())
-	}
+	seq := e.hotPathSeq.Add(1)
+	traceID := fmt.Sprintf("trace_%d", seq)
 
-	// Send a value copy to the async audit channel (non-blocking) to avoid
-	// allocating an AuditEntry on the hot path.
 	entry := AuditEntry{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:        fmt.Sprintf("audit_%d", seq),
 		Timestamp: decision.Timestamp,
 		Subject:   subject,
 		Action:    action,
 		Resource:  resource,
 		Decision:  decision,
 		TraceID:   traceID,
-		Metadata:  map[string]any{"trace_id": traceID},
 	}
 
-	// Log structured audit using configured logger (non-blocking/opinionated)
 	resStr := ""
 	if resource != nil {
-		resStr = resource.Type + ":" + resource.ID
+		resStr = resource.Key
+		if resStr == "" {
+			resStr = resource.Type + ":" + resource.ID
+		}
 	}
 	subID := ""
 	if subject != nil {
@@ -2528,9 +2556,7 @@ func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, re
 
 	select {
 	case e.auditCh <- entry:
-		// queued
 	default:
-		// drop if channel is full to avoid blocking hot path
 	}
 }
 
@@ -2878,10 +2904,10 @@ func decisionKeyToString(key DecisionKey) string {
 }
 
 func (e *Engine) getDecisionFromCache(key DecisionKey) (*Decision, bool) {
-	// prefer Ristretto cache if configured
-	if e.ristCache != nil {
+	// prefer external cache if configured
+	if e.cache != nil {
 		k := decisionKeyToString(key)
-		if v, ok := e.ristCache.Get(k); ok {
+		if v, ok := e.cache.Get(k); ok {
 			if entry, ok2 := v.(*DecisionCacheEntry); ok2 {
 				if time.Now().After(entry.ExpiresAt) {
 					return nil, false
@@ -2924,12 +2950,11 @@ func (e *Engine) setDecisionInCache(key DecisionKey, dec *Decision) {
 	copyDec.Trace = []string{"(cached)"}
 	entry := &DecisionCacheEntry{Decision: &copyDec, ExpiresAt: time.Now().Add(e.decisionCacheTTL)}
 
-	if e.ristCache != nil {
-		// Insert into ristretto cache (cost 1) using string key
+	if e.cache != nil {
+		// Insert into external cache (cost 1) using string key
 		k := decisionKeyToString(key)
-		_ = e.ristCache.Set(k, entry, 1)
-		// Wait for the value to be ingested to make reads reliable for immediate queries
-		e.ristCache.Wait()
+		e.cache.Set(k, entry, 1)
+		e.cache.Wait()
 		return
 	}
 	e.decisionCacheMu.Lock()
@@ -2943,9 +2968,8 @@ func (e *Engine) InvalidateDecisionCache() {
 		delete(e.decisionCache, k)
 	}
 	e.decisionCacheMu.Unlock()
-	// clear ristretto cache if present by recreating to ensure full flush
-	if e.ristCache != nil {
-		e.ristCache.Clear()
+	if e.cache != nil {
+		e.cache.Clear()
 	}
 }
 
@@ -3008,22 +3032,6 @@ func (e *Engine) getAttributes(ctx context.Context, subject *Subject) (map[strin
 	e.attrCacheMu.Unlock()
 
 	return merged, nil
-}
-
-// ConfigureRistrettoDecisionCache enables a Ristretto-backed decision cache with provided params.
-// numCounters: number of keys to track frequency; maxCost: approximate max cost in bytes; bufferItems: internal buffer size
-func (e *Engine) ConfigureRistrettoDecisionCache(numCounters int64, maxCost int64, bufferItems int64) error {
-	cfg := &ristretto.Config{
-		NumCounters: numCounters,
-		MaxCost:     maxCost,
-		BufferItems: int64(bufferItems),
-	}
-	cache, err := ristretto.NewCache(cfg)
-	if err != nil {
-		return err
-	}
-	e.ristCache = cache
-	return nil
 }
 
 // Role membership store wiring

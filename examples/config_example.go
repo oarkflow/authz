@@ -66,8 +66,6 @@ func buildConfigExample() {
 			e.DecisionCacheTTL = 5000
 			e.AttributeCacheTTL = 10000
 			e.AuditBatchSize = 128
-			e.RistrettoNumCounter = 1 << 16
-			e.RistrettoMaxCost = 1 << 22
 		}).
 		Build()
 

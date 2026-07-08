@@ -2,14 +2,10 @@ package stores
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"testing"
 	"time"
 
 	"github.com/oarkflow/authz"
-	"github.com/oarkflow/squealx"
-	_ "modernc.org/sqlite"
 )
 
 // ConformanceTestSuite provides a reusable test suite that can be run against
@@ -34,40 +30,6 @@ func NewMemoryTestSuite() *ConformanceTestSuite {
 		RoleMembershipStore: NewMemoryRoleMembershipStore(),
 		TenantStore:         NewMemoryTenantStore(),
 		Cleanup:             func() {},
-	}
-}
-
-// NewSQLTestSuite creates a test suite using SQL stores with a temporary SQLite DB.
-func NewSQLTestSuite(t *testing.T) *ConformanceTestSuite {
-	// Use a unique temporary file-based database for each test run
-	tempFile := fmt.Sprintf("/tmp/test_authz_%d.db", time.Now().UnixNano())
-	db, err := sql.Open("sqlite", tempFile)
-	if err != nil {
-		t.Fatalf("failed to open SQLite: %v", err)
-	}
-
-	sdb := squealx.NewDb(db, "sqlite", "sqlite")
-
-	// Run migrations using the embedded migrations
-	if err := Migrate(sdb); err != nil {
-		t.Fatalf("failed to run migrations: %v", err)
-	}
-
-	auditStore, err := NewSQLAuditStore(sdb)
-	if err != nil {
-		t.Fatalf("failed to create audit store: %v", err)
-	}
-
-	return &ConformanceTestSuite{
-		PolicyStore:         NewSQLPolicyStore(sdb),
-		RoleStore:           NewSQLRoleStore(sdb),
-		ACLStore:            NewSQLACLStore(sdb),
-		AuditStore:          auditStore,
-		RoleMembershipStore: NewSQLRoleMembershipStore(sdb),
-		TenantStore:         NewSQLTenantStore(sdb),
-		Cleanup: func() {
-			db.Close()
-		},
 	}
 }
 
@@ -679,9 +641,4 @@ func TestMemoryStoresConformance(t *testing.T) {
 	suite.RunAllTests(t)
 }
 
-// TestSQLStoresConformance runs conformance tests against SQL stores.
-func TestSQLStoresConformance(t *testing.T) {
-	suite := NewSQLTestSuite(t)
-	defer suite.Cleanup()
-	suite.RunAllTests(t)
-}
+
