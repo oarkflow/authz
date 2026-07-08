@@ -2,12 +2,24 @@ package authz
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/argon2"
+)
+
+const (
+	saArgonTime    = 3
+	saArgonMemory  = 64 * 1024
+	saArgonThreads = 4
+	saArgonKeyLen  = 32
+	saArgonSaltLen = 16
 )
 
 // ServiceAccount represents a non-human identity
@@ -53,18 +65,42 @@ func GenerateClientCredentials() (clientID, plainSecret, hashedSecret string, er
 	}
 	plainSecret = hex.EncodeToString(secretBytes)
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(plainSecret), bcrypt.DefaultCost)
-	if err != nil {
-		return "", "", "", fmt.Errorf("hash client_secret: %w", err)
+	salt := make([]byte, saArgonSaltLen)
+	if _, err = rand.Read(salt); err != nil {
+		return "", "", "", fmt.Errorf("generate salt: %w", err)
 	}
-	hashedSecret = string(hash)
+	hash := argon2.IDKey([]byte(plainSecret), salt, saArgonTime, saArgonMemory, saArgonThreads, saArgonKeyLen)
+	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
+	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
+	hashedSecret = fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", saArgonMemory, saArgonTime, saArgonThreads, b64Salt, b64Hash)
 
 	return clientID, plainSecret, hashedSecret, nil
 }
 
-// ValidateClientSecret checks plain secret against hash.
+func decodeArgon2id(encoded string) (salt, hash []byte, err error) {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" {
+		return nil, nil, errors.New("invalid argon2id hash format")
+	}
+	salt, err = base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid salt encoding: %w", err)
+	}
+	hash, err = base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid hash encoding: %w", err)
+	}
+	return salt, hash, nil
+}
+
+// ValidateClientSecret checks plain secret against argon2id hash.
 func ValidateClientSecret(plainSecret, hashedSecret string) bool {
-	return bcrypt.CompareHashAndPassword([]byte(hashedSecret), []byte(plainSecret)) == nil
+	salt, expected, err := decodeArgon2id(hashedSecret)
+	if err != nil {
+		return false
+	}
+	computed := argon2.IDKey([]byte(plainSecret), salt, saArgonTime, saArgonMemory, saArgonThreads, saArgonKeyLen)
+	return hmac.Equal(computed, expected)
 }
 
 // ToSubject converts a ServiceAccount to a Subject for authorization checks.

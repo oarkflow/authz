@@ -10,11 +10,10 @@ import (
 
 	"github.com/oarkflow/authz"
 	"github.com/oarkflow/authz/stores"
-	"gopkg.in/yaml.v3"
 )
 
 func mai1n() {
-	fmt.Println("=== AuthZ Custom DSL Demo ===\n")
+	fmt.Println("=== AuthZ Custom DSL Demo ===")
 
 	// Example 1: Parse DSL
 	dslExample()
@@ -284,17 +283,6 @@ engine cache_ttl=1000
 	json.Unmarshal(jsonData, &cfgJSON)
 	jsonDecodeTime := time.Since(start)
 
-	// Measure YAML encoding
-	start = time.Now()
-	yamlData, _ := yaml.Marshal(cfg)
-	yamlEncodeTime := time.Since(start)
-
-	// Measure YAML decoding
-	start = time.Now()
-	var cfgYAML authz.Config
-	yaml.Unmarshal(yamlData, &cfgYAML)
-	yamlDecodeTime := time.Since(start)
-
 	// Measure binary encoding
 	start = time.Now()
 	encoder := authz.NewBinaryEncoder()
@@ -310,24 +298,20 @@ engine cache_ttl=1000
 	fmt.Printf("Sizes:\n")
 	fmt.Printf("  DSL:     %d bytes\n", len(dsl))
 	fmt.Printf("  JSON:    %d bytes (%.1fx DSL)\n", len(jsonData), float64(len(jsonData))/float64(len(dsl)))
-	fmt.Printf("  YAML:    %d bytes (%.1fx DSL)\n", len(yamlData), float64(len(yamlData))/float64(len(dsl)))
 	fmt.Printf("  Binary:  %d bytes (%.1fx DSL)\n", len(binary), float64(len(binary))/float64(len(dsl)))
 
 	fmt.Printf("\nEncoding times:\n")
 	fmt.Printf("  DSL parse:     %v\n", dslTime)
 	fmt.Printf("  JSON encode:   %v\n", jsonEncodeTime)
-	fmt.Printf("  YAML encode:   %v\n", yamlEncodeTime)
 	fmt.Printf("  Binary encode: %v\n", binaryEncodeTime)
 
 	fmt.Printf("\nDecoding times:\n")
 	fmt.Printf("  DSL parse:     %v\n", dslTime)
 	fmt.Printf("  JSON decode:   %v\n", jsonDecodeTime)
-	fmt.Printf("  YAML decode:   %v\n", yamlDecodeTime)
 	fmt.Printf("  Binary decode: %v\n", binaryDecodeTime)
 
 	fmt.Printf("\nSpeed comparisons (lower is better):\n")
 	fmt.Printf("  JSON decode vs DSL parse:   %.1fx\n", float64(jsonDecodeTime)/float64(dslTime))
-	fmt.Printf("  YAML decode vs DSL parse:   %.1fx\n", float64(yamlDecodeTime)/float64(dslTime))
 	fmt.Printf("  Binary decode vs DSL parse: %.1fx\n", float64(binaryDecodeTime)/float64(dslTime))
 }
 

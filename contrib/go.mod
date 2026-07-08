@@ -5,6 +5,7 @@ go 1.26.2
 require (
 	github.com/dgraph-io/ristretto v0.2.0
 	github.com/oarkflow/authz v0.0.0-00010101000000-000000000000
+	github.com/oarkflow/date v0.0.4
 	github.com/oarkflow/squealx v0.0.77
 	github.com/redis/go-redis/v9 v9.20.1
 	go.opentelemetry.io/otel v1.44.0
@@ -21,7 +22,6 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oarkflow/date v0.0.4 // indirect
 	github.com/oarkflow/expr v0.0.11 // indirect
 	github.com/oarkflow/jet v0.0.4 // indirect
 	github.com/oarkflow/json v0.0.28 // indirect

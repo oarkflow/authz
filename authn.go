@@ -17,25 +17,48 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/crypto/argon2"
 )
 
-// ============================================================================
-// PASSWORD HASHING
-// ============================================================================
+const (
+	argonTime    = 3
+	argonMemory  = 64 * 1024
+	argonThreads = 4
+	argonKeyLen  = 32
+	argonSaltLen = 16
+)
 
-// HashPassword hashes a plaintext password using bcrypt with the default cost.
+// HashPassword hashes a plaintext password using argon2id.
 func HashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", fmt.Errorf("authn: failed to hash password: %w", err)
+	salt := make([]byte, argonSaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("authn: failed to generate salt: %w", err)
 	}
-	return string(hash), nil
+	hash := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
+	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
+	return fmt.Sprintf("$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argonMemory, argonTime, argonThreads, b64Salt, b64Hash), nil
 }
 
-// CheckPassword compares a bcrypt hash with a plaintext password.
-func CheckPassword(hash, password string) error {
-	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+// CheckPassword compares an argon2id hash with a plaintext password.
+func CheckPassword(encoded, password string) error {
+	parts := strings.Split(encoded, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" {
+		return errors.New("authn: invalid argon2id hash format")
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil {
+		return fmt.Errorf("authn: invalid salt encoding: %w", err)
+	}
+	expected, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil {
+		return fmt.Errorf("authn: invalid hash encoding: %w", err)
+	}
+	computed := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	if !hmac.Equal(computed, expected) {
+		return errors.New("authn: password mismatch")
+	}
+	return nil
 }
 
 // ============================================================================

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/oarkflow/authz"
+	"github.com/oarkflow/authz/contrib/sqldriver"
 	"github.com/oarkflow/authz/stores"
 	"github.com/oarkflow/squealx/drivers/sqlite"
 )
@@ -351,29 +352,29 @@ func newCLIEngine(sqlitePath string) (*authz.Engine, authz.ConfigIAMStores, func
 	defer func() {
 		db.Close()
 	}()
-	if err := stores.Migrate(db); err != nil {
+	if err := sqldriver.Migrate(db); err != nil {
 		return nil, authz.ConfigIAMStores{}, nil, err
 	}
-	auditStore, err := stores.NewSQLAuditStore(db)
+	auditStore, err := sqldriver.NewSQLAuditStore(db)
 	if err != nil {
 		return nil, authz.ConfigIAMStores{}, nil, err
 	}
 	engine := authz.NewEngine(
-		stores.NewSQLPolicyStore(db),
-		stores.NewSQLRoleStore(db),
-		stores.NewSQLACLStore(db),
+		sqldriver.NewSQLPolicyStore(db),
+		sqldriver.NewSQLRoleStore(db),
+		sqldriver.NewSQLACLStore(db),
 		auditStore,
-		authz.WithTenantStore(stores.NewSQLTenantStore(db)),
-		authz.WithRoleMembershipStore(stores.NewSQLRoleMembershipStore(db)),
+		authz.WithTenantStore(sqldriver.NewSQLTenantStore(db)),
+		authz.WithRoleMembershipStore(sqldriver.NewSQLRoleMembershipStore(db)),
 	)
 	iamStores := authz.ConfigIAMStores{
-		Users:                stores.NewSQLUserStore(db),
-		Groups:               stores.NewSQLGroupStore(db),
-		Scopes:               stores.NewSQLScopeStore(db),
-		ServiceAccounts:      stores.NewSQLServiceAccountStore(db),
-		Invitations:          stores.NewSQLInvitationStore(db),
-		APIKeys:              stores.NewSQLAPIKeyStore(db),
-		PermissionBoundaries: stores.NewSQLPermissionBoundaryStore(db),
+		Users:                sqldriver.NewSQLUserStore(db),
+		Groups:               sqldriver.NewSQLGroupStore(db),
+		Scopes:               sqldriver.NewSQLScopeStore(db),
+		ServiceAccounts:      sqldriver.NewSQLServiceAccountStore(db),
+		Invitations:          sqldriver.NewSQLInvitationStore(db),
+		APIKeys:              sqldriver.NewSQLAPIKeyStore(db),
+		PermissionBoundaries: sqldriver.NewSQLPermissionBoundaryStore(db),
 	}
 	return engine, iamStores, func() { db.Close() }, nil
 }

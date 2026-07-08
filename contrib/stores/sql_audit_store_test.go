@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/oarkflow/authz"
-	corestores "github.com/oarkflow/authz/stores"
+	"github.com/oarkflow/authz/contrib/sqldriver"
 	"github.com/oarkflow/squealx/drivers/sqlite"
 )
 
@@ -16,11 +16,11 @@ func TestSQLAuditStoreTraceIDRoundtrip(t *testing.T) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	defer db.Close()
-	if err := corestores.Migrate(db); err != nil {
+	if err := sqldriver.Migrate(db); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	store, err := corestores.NewSQLAuditStore(db)
+	store, err := sqldriver.NewSQLAuditStore(db)
 	if err != nil {
 		t.Fatalf("new audit store: %v", err)
 	}
