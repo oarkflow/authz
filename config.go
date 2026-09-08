@@ -42,11 +42,11 @@ type RoleMembership struct {
 }
 
 type EngineConfig struct {
-	DecisionCacheTTL    int64 `json:"decision_cache_ttl_ms" yaml:"decision_cache_ttl_ms"`
-	AttributeCacheTTL   int64 `json:"attribute_cache_ttl_ms" yaml:"attribute_cache_ttl_ms"`
-	AuditBatchSize      int   `json:"audit_batch_size" yaml:"audit_batch_size"`
-	AuditFlushInterval  int64 `json:"audit_flush_interval_ms" yaml:"audit_flush_interval_ms"`
-	BatchWorkerCount    int   `json:"batch_worker_count" yaml:"batch_worker_count"`
+	DecisionCacheTTL   int64 `json:"decision_cache_ttl_ms" yaml:"decision_cache_ttl_ms"`
+	AttributeCacheTTL  int64 `json:"attribute_cache_ttl_ms" yaml:"attribute_cache_ttl_ms"`
+	AuditBatchSize     int   `json:"audit_batch_size" yaml:"audit_batch_size"`
+	AuditFlushInterval int64 `json:"audit_flush_interval_ms" yaml:"audit_flush_interval_ms"`
+	BatchWorkerCount   int   `json:"batch_worker_count" yaml:"batch_worker_count"`
 }
 
 // ConfigLoader loads configuration from various formats
@@ -87,6 +87,7 @@ func (c *Config) ToJSON() ([]byte, error) {
 // ApplyConfig applies configuration to engine and stores
 func (e *Engine) ApplyConfig(ctx context.Context, cfg *Config) error {
 	// Apply engine settings
+	e.configMu.Lock()
 	if cfg.Engine.DecisionCacheTTL > 0 {
 		e.decisionCacheTTL = time.Duration(cfg.Engine.DecisionCacheTTL) * time.Millisecond
 	}
@@ -102,6 +103,7 @@ func (e *Engine) ApplyConfig(ctx context.Context, cfg *Config) error {
 	if cfg.Engine.BatchWorkerCount > 0 {
 		e.batchWorkerCount = cfg.Engine.BatchWorkerCount
 	}
+	e.configMu.Unlock()
 	// Apply tenant hierarchy
 	if len(cfg.Hierarchy) > 0 && e.tenantResolver == nil {
 		resolver := NewMemoryTenantResolver()

@@ -1431,6 +1431,7 @@ type attrCacheEntry struct {
 }
 
 type Engine struct {
+	configMu            sync.RWMutex
 	policyStore         PolicyStore
 	roleStore           RoleStore
 	aclStore            ACLStore
@@ -2591,7 +2592,10 @@ func (e *Engine) BatchAuthorize(ctx context.Context, requests []AuthRequest) ([]
 					return
 				default:
 				}
-				decision, err := e.Authorize(ctx, work.req.Subject, work.req.Action, work.req.Resource, work.req.Environment)
+				// Authorize enriches Subject.Attrs. Batch requests may legitimately
+				// share a subject pointer, so each worker must receive an isolated
+				// copy before concurrent evaluation.
+				decision, err := e.Authorize(ctx, cloneSubject(work.req.Subject), work.req.Action, work.req.Resource, work.req.Environment)
 				if err != nil {
 					e.pushBatchError(errCh, err)
 					return
@@ -2629,6 +2633,22 @@ func (e *Engine) BatchAuthorize(ctx context.Context, requests []AuthRequest) ([]
 	return decisions, nil
 }
 
+func cloneSubject(subject *Subject) *Subject {
+	if subject == nil {
+		return nil
+	}
+	clone := *subject
+	clone.Roles = append([]string(nil), subject.Roles...)
+	clone.Groups = append([]string(nil), subject.Groups...)
+	if subject.Attrs != nil {
+		clone.Attrs = make(map[string]any, len(subject.Attrs))
+		for key, value := range subject.Attrs {
+			clone.Attrs[key] = value
+		}
+	}
+	return &clone
+}
+
 func (e *Engine) pushBatchError(ch chan<- error, err error) {
 	if err == nil {
 		return
@@ -2640,16 +2660,20 @@ func (e *Engine) pushBatchError(ch chan<- error, err error) {
 }
 
 func (e *Engine) startAuditWorker() {
+	e.configMu.Lock()
 	if e.auditBatchSize <= 0 {
 		e.auditBatchSize = 1
 	}
 	if e.auditFlushInterval <= 0 {
 		e.auditFlushInterval = 25 * time.Millisecond
 	}
+	batchSize := e.auditBatchSize
+	flushInterval := e.auditFlushInterval
+	e.configMu.Unlock()
 	go func() {
-		ticker := time.NewTicker(e.auditFlushInterval)
+		ticker := time.NewTicker(flushInterval)
 		defer ticker.Stop()
-		batch := make([]*AuditEntry, 0, e.auditBatchSize)
+		batch := make([]*AuditEntry, 0, batchSize)
 		flush := func() {
 			if len(batch) == 0 {
 				return
@@ -2666,7 +2690,7 @@ func (e *Engine) startAuditWorker() {
 				}
 				copyEntry := entry
 				batch = append(batch, &copyEntry)
-				if len(batch) >= e.auditBatchSize {
+				if len(batch) >= batchSize {
 					flush()
 				}
 			case <-ticker.C:
