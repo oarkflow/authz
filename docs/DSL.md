@@ -55,6 +55,38 @@ include "./routes/admin.authz"
 
 Includes are resolved relative to the including file when using `ParseFile` or `authz-config`, and cycles are rejected.
 
+#### Include path safety
+
+`include` accepts a filesystem path, and by itself that path is **not sandboxed**: nothing
+stops `include "../../../etc/passwd"` or `include "/etc/passwd"` from being read if the
+target happens to parse (or even fails to parse — the returned error can still confirm
+whether the file exists). Treat `.authz` sources as trusted input, the same as any other
+configuration file that can name arbitrary paths on disk.
+
+Two options harden this:
+
+- **`NewDSLParser()` rejects absolute include paths by default.** `include "/etc/passwd"`
+  fails immediately with `absolute include paths are not allowed`. Call
+  `AllowAbsoluteIncludes(true)` to opt back in (this is the default for
+  `NewPermissiveDSLParser()`, preserving old behavior for legacy configs).
+- **`SetIncludeRoot(root)` jails all includes (relative or absolute) to a directory.** The
+  target path is resolved to an absolute path, symlinks are resolved on both the target and
+  the root where possible (so a symlink planted inside the root cannot be used to hop
+  outside it), and anything that does not resolve underneath `root` is rejected with
+  `include path escapes allowed root directory`.
+
+```go
+parser := authz.NewDSLParser().SetIncludeRoot("/etc/myapp/authz")
+cfg, err := parser.ParseFile("/etc/myapp/authz/main.authz")
+```
+
+**Recommendation:** always call `SetIncludeRoot` with the directory that holds your
+`.authz` files (or their common parent) when loading configuration from an untrusted or
+semi-trusted source (e.g. uploaded by a tenant admin), and keep `NewDSLParser()`'s
+strict, absolute-path-rejecting default rather than switching to
+`NewPermissiveDSLParser()` or `AllowAbsoluteIncludes(true)` unless you control every
+`.authz` file that can ever be included.
+
 ## Directives
 
 ### tenant
@@ -331,11 +363,17 @@ Supported advanced forms:
 
 ```
 field>=value
+field>value
+field<value
 regex(field,pattern)
 cidr(10.0.0.0/8)
 time_between(09:00,18:00)
 range(field,min,max)
 ```
+
+`>` and `<` are strict comparisons (no equality), evaluated with the same numeric/string
+comparator as `>=`. `>=` is still matched first so `field>=value` is never misparsed as
+`field>` followed by a stray `=value`.
 
 ### Field References
 - `subject.id`, `subject.type`, `subject.roles`, `subject.groups`
