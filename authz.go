@@ -421,6 +421,50 @@ func (e *GteExpr) String() string {
 	return fmt.Sprintf("%s >= %v", e.Field, e.Value)
 }
 
+// GtExpr represents strict greater-than check
+type GtExpr struct {
+	Field string
+	Value any
+}
+
+func (e *GtExpr) Evaluate(ctx *EvalContext) (bool, error) {
+	val := getField(ctx, e.Field)
+	switch v := e.Value.(type) {
+	case string:
+		if v == "action" || len(v) > 8 && (v[:8] == "subject." || v[:9] == "resource." || v[:4] == "env.") {
+			rv := getField(ctx, v)
+			return compare(val, rv) > 0, nil
+		}
+	}
+	return compare(val, e.Value) > 0, nil
+}
+
+func (e *GtExpr) String() string {
+	return fmt.Sprintf("%s > %v", e.Field, e.Value)
+}
+
+// LtExpr represents strict less-than check
+type LtExpr struct {
+	Field string
+	Value any
+}
+
+func (e *LtExpr) Evaluate(ctx *EvalContext) (bool, error) {
+	val := getField(ctx, e.Field)
+	switch v := e.Value.(type) {
+	case string:
+		if v == "action" || len(v) > 8 && (v[:8] == "subject." || v[:9] == "resource." || v[:4] == "env.") {
+			rv := getField(ctx, v)
+			return compare(val, rv) < 0, nil
+		}
+	}
+	return compare(val, e.Value) < 0, nil
+}
+
+func (e *LtExpr) String() string {
+	return fmt.Sprintf("%s < %v", e.Field, e.Value)
+}
+
 // TrueExpr always returns true (unconditional policy)
 type TrueExpr struct{}
 
@@ -764,6 +808,8 @@ const (
 	OP_NE
 	OP_IN
 	OP_GTE
+	OP_GT
+	OP_LT
 	OP_AND
 	OP_OR
 	OP_TIME_BETWEEN
@@ -870,6 +916,14 @@ func (bc *Bytecode) Eval(ctx *EvalContext) (bool, error) {
 			b := pop()
 			a := pop()
 			push(compare(a, b) >= 0)
+		case OP_GT:
+			b := pop()
+			a := pop()
+			push(compare(a, b) > 0)
+		case OP_LT:
+			b := pop()
+			a := pop()
+			push(compare(a, b) < 0)
 		case OP_AND:
 			b := pop().(bool)
 			a := pop().(bool)
@@ -967,6 +1021,16 @@ func compileToBytecode(e Expr) *Bytecode {
 			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_GTE}, args: []interface{}{v.Field, rv}}
 		}
 		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_GTE}, args: []interface{}{v.Field, v.Value}}
+	case *GtExpr:
+		if rv, ok := v.Value.(string); ok && (rv == "action" || strings.HasPrefix(rv, "subject.") || strings.HasPrefix(rv, "resource.") || strings.HasPrefix(rv, "env.")) {
+			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_GT}, args: []interface{}{v.Field, rv}}
+		}
+		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_GT}, args: []interface{}{v.Field, v.Value}}
+	case *LtExpr:
+		if rv, ok := v.Value.(string); ok && (rv == "action" || strings.HasPrefix(rv, "subject.") || strings.HasPrefix(rv, "resource.") || strings.HasPrefix(rv, "env.")) {
+			return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_FIELD, OP_LT}, args: []interface{}{v.Field, rv}}
+		}
+		return &Bytecode{ops: []OpCode{OP_PUSH_FIELD, OP_PUSH_CONST, OP_LT}, args: []interface{}{v.Field, v.Value}}
 	case *AndExpr:
 		l := compileToBytecode(v.Left)
 		r := compileToBytecode(v.Right)
@@ -3479,6 +3543,32 @@ func compilePredicate(e Expr) CompiledPredicate {
 				}
 			}
 			return compare(val, expr.Value) >= 0, nil
+		}
+	case *GtExpr:
+		expr := v
+		return func(ctx *EvalContext) (bool, error) {
+			val := getField(ctx, expr.Field)
+			switch ve := expr.Value.(type) {
+			case string:
+				if ve == "action" || len(ve) > 8 && (ve[:8] == "subject." || ve[:9] == "resource." || ve[:4] == "env.") {
+					rv := getField(ctx, ve)
+					return compare(val, rv) > 0, nil
+				}
+			}
+			return compare(val, expr.Value) > 0, nil
+		}
+	case *LtExpr:
+		expr := v
+		return func(ctx *EvalContext) (bool, error) {
+			val := getField(ctx, expr.Field)
+			switch ve := expr.Value.(type) {
+			case string:
+				if ve == "action" || len(ve) > 8 && (ve[:8] == "subject." || ve[:9] == "resource." || ve[:4] == "env.") {
+					rv := getField(ctx, ve)
+					return compare(val, rv) < 0, nil
+				}
+			}
+			return compare(val, expr.Value) < 0, nil
 		}
 	case *AndExpr:
 		left := compilePredicate(v.Left)

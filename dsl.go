@@ -26,6 +26,8 @@ type DSLParser struct {
 	strict       bool
 	zeroCopy     bool
 	baseDir      string
+	includeRoot  string
+	allowAbsInc  bool
 	includeSet   map[string]bool
 	now          time.Time
 	partsScratch []string
@@ -46,15 +48,41 @@ type DSLParser struct {
 }
 
 func NewDSLParser() *DSLParser {
+	// Strict mode rejects absolute include paths by default; call AllowAbsoluteIncludes(true)
+	// or SetIncludeRoot to opt back in explicitly.
 	return &DSLParser{strict: true, zeroCopy: true}
 }
 
 func NewPermissiveDSLParser() *DSLParser {
-	return &DSLParser{strict: false, zeroCopy: true}
+	return &DSLParser{strict: false, zeroCopy: true, allowAbsInc: true}
 }
 
 func (p *DSLParser) SetStrict(strict bool) *DSLParser {
 	p.strict = strict
+	return p
+}
+
+// SetIncludeRoot restricts `include` directives to files within root (resolved to an
+// absolute path). Any include that resolves outside root, including via "../" traversal
+// or a symlink, is rejected. Pass "" to clear the restriction.
+func (p *DSLParser) SetIncludeRoot(root string) *DSLParser {
+	if root == "" {
+		p.includeRoot = ""
+		return p
+	}
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
+	p.includeRoot = root
+	return p
+}
+
+// AllowAbsoluteIncludes controls whether `include "/abs/path"` directives are permitted.
+// NewDSLParser() rejects them by default; NewPermissiveDSLParser() allows them for
+// backward compatibility. This is independent of SetIncludeRoot, which still applies
+// to absolute paths when both are configured.
+func (p *DSLParser) AllowAbsoluteIncludes(allow bool) *DSLParser {
+	p.allowAbsInc = allow
 	return p
 }
 
@@ -1082,6 +1110,9 @@ func (p *DSLParser) parseInclude(cfg *Config, parts []string) error {
 	if name == "" {
 		return fmt.Errorf("include path is required")
 	}
+	if filepath.IsAbs(name) && !p.allowAbsInc {
+		return fmt.Errorf("absolute include paths are not allowed")
+	}
 	base := p.baseDir
 	if base == "" {
 		base = "."
@@ -1094,6 +1125,11 @@ func (p *DSLParser) parseInclude(cfg *Config, parts []string) error {
 	if err != nil {
 		return err
 	}
+	if p.includeRoot != "" {
+		if !withinRoot(abs, p.includeRoot) {
+			return fmt.Errorf("include path escapes allowed root directory")
+		}
+	}
 	if p.includeSet == nil {
 		p.includeSet = make(map[string]bool)
 	}
@@ -1103,6 +1139,29 @@ func (p *DSLParser) parseInclude(cfg *Config, parts []string) error {
 	}
 	mergeConfig(cfg, included)
 	return nil
+}
+
+// withinRoot reports whether abs (an already-absolute, filepath.Clean-able path) resolves
+// to a location inside root. Symlinks are resolved on both sides where possible so a link
+// planted inside root cannot be used to escape it; when a path does not yet exist (e.g. the
+// include target is missing), the unresolved, cleaned path is checked instead.
+func withinRoot(abs, root string) bool {
+	target := filepath.Clean(abs)
+	if real, err := filepath.EvalSymlinks(target); err == nil {
+		target = real
+	}
+	rootClean := filepath.Clean(root)
+	if real, err := filepath.EvalSymlinks(rootClean); err == nil {
+		rootClean = real
+	}
+	rel, err := filepath.Rel(rootClean, target)
+	if err != nil {
+		return false
+	}
+	if rel == "." {
+		return true
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func mergeConfig(dst, src *Config) {
@@ -2094,6 +2153,18 @@ func (p *conditionParser) parseAtom() (Expr, error) {
 			return nil, fmt.Errorf("malformed comparison")
 		}
 		return &GteExpr{Field: field, Value: parseScalar(value)}, nil
+	case p.consume(">"):
+		value := p.readValue(")&|")
+		if value == "" {
+			return nil, fmt.Errorf("malformed comparison")
+		}
+		return &GtExpr{Field: field, Value: parseScalar(value)}, nil
+	case p.consume("<"):
+		value := p.readValue(")&|")
+		if value == "" {
+			return nil, fmt.Errorf("malformed comparison")
+		}
+		return &LtExpr{Field: field, Value: parseScalar(value)}, nil
 	case p.consume("=="):
 		value := p.readValue(")&|")
 		if value == "" {
@@ -2284,7 +2355,7 @@ func (p *conditionParser) readField() string {
 	start := p.pos
 	for p.pos < len(p.input) {
 		ch := p.input[p.pos]
-		if ch == ' ' || ch == '\t' || strings.ContainsRune("!=>@(),&|", rune(ch)) {
+		if ch == ' ' || ch == '\t' || strings.ContainsRune("!=><@(),&|", rune(ch)) {
 			break
 		}
 		p.pos++
@@ -2328,6 +2399,10 @@ func conditionToDSL(expr Expr) string {
 		return e.Field + "!=" + fmt.Sprint(e.Value)
 	case *GteExpr:
 		return e.Field + ">=" + fmt.Sprint(e.Value)
+	case *GtExpr:
+		return e.Field + ">" + fmt.Sprint(e.Value)
+	case *LtExpr:
+		return e.Field + "<" + fmt.Sprint(e.Value)
 	case *InExpr:
 		parts := make([]string, 0, len(e.Values))
 		for _, v := range e.Values {

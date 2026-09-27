@@ -22,6 +22,12 @@ engine cache_ttl=<ms> attr_ttl=<ms> batch_size=<n> flush_interval=<ms> workers=<
 
 Large configs can use `include "./other.authz"`. Includes resolve relative to the including file and cycles are rejected.
 
+`include` paths are not sandboxed by default and can name any absolute or relative path on
+disk. `authz.NewDSLParser()` rejects absolute include paths unless
+`AllowAbsoluteIncludes(true)` is set, and `SetIncludeRoot(root)` restricts all includes
+(relative or absolute, including via `../` traversal or symlinks) to files under `root`.
+See docs/DSL.md's "Include path safety" section for details and recommendations.
+
 Route permissions use normal resources:
 
 ```authz
@@ -54,6 +60,8 @@ subject.type=user
 subject.attrs.clearance!=high
 subject.roles@admin,superadmin
 (subject.roles@admin,ops || resource.owner_id=subject.id) && subject.attrs.level>=3
+subject.attrs.level>3
+subject.attrs.level<3
 regex(subject.id,^user:)
 cidr(10.0.0.0/8)
 time_between(09:00,18:00)

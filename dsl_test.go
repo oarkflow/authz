@@ -524,3 +524,136 @@ engine cache_ttl=5000
 	// Tenants: 1
 	// Policies: 1
 }
+
+func TestConditionGreaterLessThan(t *testing.T) {
+	expr, err := authz.ParseCondition("age>18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gt, ok := expr.(*authz.GtExpr)
+	if !ok {
+		t.Fatalf("expected *authz.GtExpr, got %T", expr)
+	}
+	if gt.Field != "age" || gt.Value != int64(18) {
+		t.Fatalf("unexpected GtExpr: %+v", gt)
+	}
+
+	expr, err = authz.ParseCondition("score<3.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lt, ok := expr.(*authz.LtExpr)
+	if !ok {
+		t.Fatalf("expected *authz.LtExpr, got %T", expr)
+	}
+	if lt.Field != "score" || lt.Value != 3.5 {
+		t.Fatalf("unexpected LtExpr: %+v", lt)
+	}
+
+	// >= must still take priority over the new > operator.
+	expr, err = authz.ParseCondition("age>=18")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := expr.(*authz.GteExpr); !ok {
+		t.Fatalf("expected *authz.GteExpr, got %T", expr)
+	}
+}
+
+func TestConditionGreaterLessThanEvaluate(t *testing.T) {
+	subject := &authz.Subject{ID: "user:alice", Attrs: map[string]any{"age": 21.0}}
+	ctx := &authz.EvalContext{Subject: subject}
+
+	gtExpr, err := authz.ParseCondition("subject.attrs.age>18.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := gtExpr.Evaluate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatalf("expected age>18.0 to be true for age=21")
+	}
+
+	ltExpr, err := authz.ParseCondition("subject.attrs.age<18.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err = ltExpr.Evaluate(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("expected age<18.0 to be false for age=21")
+	}
+
+	combined := "policy p1 org1 allow read document:* subject.attrs.age>18.0"
+	cfg, err := authz.NewDSLParser().Parse([]byte("tenant org1 \"Org\"\n" + combined))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Policies) != 1 {
+		t.Fatalf("expected 1 policy, got %d", len(cfg.Policies))
+	}
+	if got, err := cfg.Policies[0].Condition.Evaluate(ctx); err != nil || !got {
+		t.Fatalf("expected policy condition to evaluate true, got %v err=%v", got, err)
+	}
+}
+
+func TestIncludeRejectsAbsolutePathByDefault(t *testing.T) {
+	dsl := `include "/etc/passwd"`
+	_, err := authz.NewDSLParser().Parse([]byte(dsl))
+	if err == nil {
+		t.Fatal("expected strict parser to reject absolute include path")
+	}
+}
+
+func TestIncludeRootRestrictsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	sandbox := dir + "/sandbox"
+	if err := os.MkdirAll(sandbox, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := dir + "/outside.authz"
+	if err := os.WriteFile(outside, []byte(`tenant leaked "Leaked"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry := sandbox + "/main.authz"
+	if err := os.WriteFile(entry, []byte(`include "../outside.authz"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := authz.NewPermissiveDSLParser().SetIncludeRoot(sandbox)
+	_, err := parser.ParseFile(entry)
+	if err == nil {
+		t.Fatal("expected include escaping the configured root to be rejected")
+	}
+
+	absDsl := `include "/etc/passwd"`
+	permissive := authz.NewPermissiveDSLParser().SetIncludeRoot(sandbox)
+	if _, err := permissive.Parse([]byte(absDsl)); err == nil {
+		t.Fatal("expected /etc/passwd include outside the root to be rejected")
+	}
+}
+
+func TestIncludeRootAllowsWithinRoot(t *testing.T) {
+	dir := t.TempDir()
+	included := dir + "/inner.authz"
+	if err := os.WriteFile(included, []byte(`tenant inner "Inner"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	entry := dir + "/main.authz"
+	if err := os.WriteFile(entry, []byte(`include "inner.authz"`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	parser := authz.NewPermissiveDSLParser().SetIncludeRoot(dir)
+	cfg, err := parser.ParseFile(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Tenants) != 1 || cfg.Tenants[0].ID != "inner" {
+		t.Fatalf("expected included tenant to be merged, got %+v", cfg.Tenants)
+	}
+}
