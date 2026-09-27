@@ -1588,7 +1588,35 @@ func (e *Engine) ReloadPolicies(ctx context.Context, tenantID string) error {
 	return nil
 }
 
-// Authorize makes an authorization decision
+// Authorize makes an authorization decision.
+//
+// Combining algorithm: deny-overrides, then default-deny.
+//
+// The engine uses a fixed, hardcoded "deny-overrides" strategy (the same
+// family of combining algorithm as XACML's deny-overrides): any applicable
+// explicit deny wins regardless of any allow rule that also applies, and if
+// nothing explicitly grants access the request is denied by default. This
+// is not currently configurable or pluggable - callers cannot select a
+// different combining algorithm (e.g. allow-overrides, first-applicable);
+// changing it requires modifying authorizeInternal directly.
+//
+// Evaluation order (each step short-circuits and returns as soon as it
+// produces a decision):
+//
+//  1. Tenant isolation - the request is rejected before any policy/ACL/RBAC
+//     evaluation if the subject/resource/environment tenants are not
+//     compatible (see the tenant checks at the top of authorizeInternal).
+//  2. Explicit DENY (highest precedence) - ABAC policies with Effect=Deny,
+//     then ACL entries with Effect=Deny. A match here immediately denies,
+//     even if an allow rule below would otherwise match.
+//  3. Allow - evaluated in this sub-order, first match wins:
+//     a. ACL allow entries
+//     b. ABAC policy allow rules
+//     c. RBAC-derived allow (role permissions, including inherited roles)
+//     d. Tenant-owner privilege (subject.Attrs["is_tenant_owner"] or
+//     Role.OwnerAllowedActions) and cross-tenant admin status
+//  4. Default DENY - if no explicit deny matched and nothing above granted
+//     access, the request is denied ("default deny" / fail-closed).
 func (e *Engine) Authorize(ctx context.Context, subject *Subject, action Action, resource *Resource, env *Environment) (*Decision, error) {
 	return e.authorizeInternal(ctx, subject, action, resource, env, false)
 }

@@ -95,6 +95,15 @@ func main() {
 
 The engine evaluates explicit denials before grants. Deny policies and deny ACLs take precedence over allows. Allows may come from policies, ACLs, RBAC permissions, owner rules, or cross-tenant admin status.
 
+This is a named combining algorithm: **deny-overrides, then default-deny** (the same family as XACML's deny-overrides). Concretely, `Engine.Authorize` short-circuits through these steps in order, returning on the first match:
+
+1. Tenant isolation - reject upfront if the subject/resource/environment tenants aren't compatible.
+2. Explicit DENY - policy denies, then ACL denies. Any match here wins outright, overriding every allow rule below.
+3. Allow - checked in order: ACL allow, ABAC policy allow, RBAC-derived allow (including inherited roles), then tenant-owner/cross-tenant-admin privilege.
+4. Default DENY - if nothing above matched, the request is denied (fail-closed).
+
+This combining algorithm is currently fixed and not configurable or pluggable - there is no option to switch to a different strategy (such as allow-overrides or first-applicable) at runtime or via configuration. See the doc comment on `Engine.Authorize` in `authz.go` for the authoritative, code-level description of this order.
+
 Policies are tenant-scoped and priority ordered. Higher priority policies are evaluated first. `Enabled` policies participate in checks; disabled policies are ignored.
 
 RBAC permissions are defined on roles as `Action` plus `Resource`. Role inheritance is recursive and cycle-protected. Role membership can be supplied directly on `Subject.Roles` and through a configured `RoleMembershipStore`.
