@@ -14,6 +14,6 @@
 
 ## Observability & DX Enhancements
 - [ ] Ship OpenTelemetry metrics/traces (decision latency, cache hit ratio) gated behind an engine option.
-- [ ] Create conformance tests (and CI workflow) covering memory + SQL stores to prevent regressions when adding indexes.
+- [x] Create conformance tests (and CI workflow) covering memory + SQL stores to prevent regressions when adding indexes (`pkg/stores.ConformanceTestSuite` now also runs against `contrib/sqlitestore` and `contrib/sqldriver`; wired into CI's contrib test step).
 - [ ] Publish reusable middleware packages (Fiber, chi, Echo) under `examples/` with shared helpers for request-to-subject translation.
 - [ ] Provide a CLI (`authzctl`) for seeding policies/roles and inspecting cache state for troubleshooting.
