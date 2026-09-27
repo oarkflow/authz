@@ -2,6 +2,7 @@ package sqldriver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"time"
 
@@ -21,7 +22,7 @@ func NewSQLAuditStore(db *squealx.DB) (*SQLAuditStore, error) {
 func (s *SQLAuditStore) LogDecision(ctx context.Context, entry *authz.AuditEntry) error {
 	traceB, _ := json.Marshal(entry.Decision.Trace)
 	metaB, _ := json.Marshal(entry.Metadata)
-	q := `INSERT INTO audit_log(id, timestamp, tenant_id, subject_id, action, resource, allowed, matched_by, reason, trace_json, metadata_json) VALUES(:id, :timestamp, :tenant_id, :subject_id, :action, :resource, :allowed, :matched_by, :reason, :trace_json, :metadata_json)`
+	q := `INSERT INTO audit_log(id, timestamp, tenant_id, subject_id, action, resource, allowed, matched_by, reason, trace_id, trace_json, metadata_json, prev_hash, hash) VALUES(:id, :timestamp, :tenant_id, :subject_id, :action, :resource, :allowed, :matched_by, :reason, :trace_id, :trace_json, :metadata_json, :prev_hash, :hash)`
 	tenant := ""
 	if entry != nil && entry.Resource != nil {
 		tenant = entry.Resource.TenantID
@@ -48,15 +49,22 @@ func (s *SQLAuditStore) LogDecision(ctx context.Context, entry *authz.AuditEntry
 		"allowed":       boolToInt(entry.Decision.Allowed),
 		"matched_by":    entry.Decision.MatchedBy,
 		"reason":        entry.Decision.Reason,
+		"trace_id":      entry.TraceID,
 		"trace_json":    string(traceB),
 		"metadata_json": string(metaB),
+		"prev_hash":     entry.PrevHash,
+		"hash":          entry.Hash,
 	})
 	return err
 }
 
 func (s *SQLAuditStore) GetAccessLog(ctx context.Context, filter authz.AuditFilter) ([]*authz.AuditEntry, error) {
-	q := `SELECT id, timestamp, tenant_id, subject_id, action, resource, allowed, matched_by, reason, trace_json, metadata_json FROM audit_log WHERE 1=1`
+	q := `SELECT id, timestamp, tenant_id, subject_id, action, resource, allowed, matched_by, reason, trace_id, trace_json, metadata_json, prev_hash, hash FROM audit_log WHERE 1=1`
 	params := map[string]any{}
+	if filter.TenantID != "" {
+		q += " AND tenant_id = :tenant_id"
+		params["tenant_id"] = filter.TenantID
+	}
 	if filter.SubjectID != "" {
 		q += " AND subject_id = :subject_id"
 		params["subject_id"] = filter.SubjectID
@@ -77,6 +85,7 @@ func (s *SQLAuditStore) GetAccessLog(ctx context.Context, filter authz.AuditFilt
 		q += " AND timestamp <= :end"
 		params["end"] = filter.EndTime
 	}
+	q += " ORDER BY timestamp ASC, id ASC"
 	if filter.Limit > 0 {
 		q += " LIMIT :limit"
 		params["limit"] = filter.Limit
@@ -91,12 +100,13 @@ func (s *SQLAuditStore) GetAccessLog(ctx context.Context, filter authz.AuditFilt
 	out := make([]*authz.AuditEntry, 0)
 	for r.Next() {
 		var id, tenant, subject, action, resource, matchedBy, reason, traceJSON, metaJSON string
+		var traceID, prevHash, hash sql.NullString
 		var timestampRaw interface{}
 		var allowedInt int
-		if err := r.Scan(&id, &timestampRaw, &tenant, &subject, &action, &resource, &allowedInt, &matchedBy, &reason, &traceJSON, &metaJSON); err != nil {
+		if err := r.Scan(&id, &timestampRaw, &tenant, &subject, &action, &resource, &allowedInt, &matchedBy, &reason, &traceID, &traceJSON, &metaJSON, &prevHash, &hash); err != nil {
 			return nil, err
 		}
-		entry := &authz.AuditEntry{ID: id}
+		entry := &authz.AuditEntry{ID: id, TraceID: traceID.String, PrevHash: prevHash.String, Hash: hash.String}
 		switch v := timestampRaw.(type) {
 		case time.Time:
 			entry.Timestamp = v
@@ -114,6 +124,7 @@ func (s *SQLAuditStore) GetAccessLog(ctx context.Context, filter authz.AuditFilt
 		entry.Resource = &authz.Resource{ID: resource}
 		if tenant != "" {
 			entry.Resource.TenantID = tenant
+			entry.Subject.TenantID = tenant
 		}
 		entry.Decision = &authz.Decision{Allowed: allowedInt != 0, MatchedBy: matchedBy, Reason: reason}
 		_ = json.Unmarshal([]byte(traceJSON), &entry.Decision.Trace)

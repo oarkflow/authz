@@ -72,8 +72,11 @@ CREATE TABLE IF NOT EXISTS audit_log (
   allowed INTEGER,
   matched_by TEXT,
   reason TEXT,
+  trace_id TEXT,
   trace_json TEXT,
-  metadata_json TEXT
+  metadata_json TEXT,
+  prev_hash TEXT,
+  hash TEXT
 );
 
 -- invitations
