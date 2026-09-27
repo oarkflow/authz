@@ -265,6 +265,20 @@ The extended admin server adds IAM and operational endpoints when their stores a
 - `/tenants/{tenant}/events`
 - `/tenants/{tenant}/effective-permissions`
 
+### OpenAPI Spec
+
+A complete OpenAPI 3.1 specification for the admin HTTP API — every endpoint above,
+request/response schemas, status codes, and the `AdminAuthFunc`-based auth scheme —
+is available at [`docs/openapi.yaml`](./docs/openapi.yaml). It reflects the actual
+handler behavior (not just this README), including a couple of quirks such as
+policies/roles not supporting `GET` by id and there being no separate
+enable/disable endpoint for policies (use `PUT` with `enabled` instead).
+
+Use it with tools like [Swagger UI](https://swagger.io/tools/swagger-ui/),
+[Redocly](https://redocly.com/) (`redocly preview-docs docs/openapi.yaml`), or
+[openapi-generator](https://openapi-generator.tech/) to render interactive docs
+or generate client SDKs in your language of choice.
+
 ## Stores
 
 The `stores` package provides memory stores for development and tests plus SQL stores for persistent deployments.
