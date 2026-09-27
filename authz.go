@@ -1661,6 +1661,9 @@ type Engine struct {
 	roleMembershipStore RoleMembershipStore
 	bundleDistributor   *PolicyBundleDistributor
 	delegationStore     DelegationStore
+	// optional ReBAC relationship graph (additive allow-path; nil when unused)
+	relationshipStore RelationshipStore
+	relationConfig    *RelationConfig
 	// attribute cache for external providers
 	attrCache    map[string]*attrCacheEntry
 	attrCacheMu  sync.RWMutex
@@ -2156,6 +2159,24 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 		decision.Reason = "cross-tenant admin"
 		if includeTrace {
 			decision.Trace = append(decision.Trace, "   ALLOW by cross-tenant admin privilege")
+		}
+		ck := e.buildCacheKey(subject, action, resource, env)
+		e.setDecisionInCache(ck, decision)
+		e.auditLog(ctx, subject, action, resource, decision)
+		return decision, nil
+	}
+
+	// 4.75 ReBAC relationship allow (optional; only active when a
+	// RelationshipStore + RelationConfig were configured via WithRelationshipStore)
+	if includeTrace {
+		decision.Trace = append(decision.Trace, "4.75 Checking ReBAC relationship allow...")
+	}
+	if allowed, relation := e.checkRelationships(ctx, subject, action, resource); allowed {
+		decision.Allowed = true
+		decision.Reason = "relationship allow"
+		decision.MatchedBy = relation
+		if includeTrace {
+			decision.Trace = append(decision.Trace, fmt.Sprintf("   ALLOW by relationship: %s", relation))
 		}
 		ck := e.buildCacheKey(subject, action, resource, env)
 		e.setDecisionInCache(ck, decision)

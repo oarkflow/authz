@@ -93,7 +93,7 @@ func main() {
 
 ## Evaluation Semantics
 
-The engine evaluates explicit denials before grants. Deny policies and deny ACLs take precedence over allows. Allows may come from policies, ACLs, RBAC permissions, owner rules, or cross-tenant admin status.
+The engine evaluates explicit denials before grants. Deny policies and deny ACLs take precedence over allows. Allows may come from policies, ACLs, RBAC permissions, owner rules, cross-tenant admin status, or (optionally) ReBAC relationship tuples — see [Relationship-Based Access Control (ReBAC)](#relationship-based-access-control-rebac).
 
 This is a named combining algorithm: **deny-overrides, then default-deny** (the same family as XACML's deny-overrides). Concretely, `Engine.Authorize` short-circuits through these steps in order, returning on the first match:
 
@@ -162,6 +162,75 @@ decision, err := engine.AuthorizeBreakGlass(ctx, oncallEngineer, "delete", resou
 ```
 
 Because break-glass access always succeeds, treat every invocation as an incident: alert on `authz.BreakGlassAction` entries in the audit log and require the justification field to be reviewed post-hoc.
+
+## Relationship-Based Access Control (ReBAC)
+
+`relationships.go` adds an optional, Zanzibar/SpiceDB-inspired relationship-tuple model as one more allow-source alongside the existing ABAC policies, ACLs, and RBAC roles. It is purely additive: when it isn't configured on an `Engine`, behavior is completely unchanged, and it never affects the deny paths — explicit deny policies and deny ACLs still win over everything, including relationship allows.
+
+### Tuple model
+
+A `RelationTuple` states that a subject has a relation to an object:
+
+```go
+authz.RelationTuple{
+    ObjectType: "document", ObjectID: "123",
+    Relation:   "viewer",
+    SubjectType: "user", SubjectID: "alice",
+}
+// document:123#viewer@user:alice
+```
+
+A tuple can also point at a subject *set* instead of a single subject, which is how group membership composes into access without the engine needing to know about groups directly:
+
+```go
+authz.RelationTuple{
+    ObjectType: "document", ObjectID: "123",
+    Relation:   "viewer",
+    SubjectType: "group", SubjectID: "eng", SubjectRelation: "member",
+}
+// document:123#viewer@group:eng#member
+// "anyone who has relation 'member' on group:eng is a viewer of document:123"
+```
+
+`RelationshipStore.Check` resolves both direct tuples and subject-set indirection with a bounded-depth graph walk (10 hops by default) so that "alice is a member of group:eng" plus the tuple above transitively grants alice `viewer` access, while cycles (e.g. group A containing group B containing group A) cannot cause an infinite loop.
+
+### Wiring it into the engine
+
+`RelationConfig` maps `(action, resourceType)` to the relation(s) that satisfy it, which is how a generic `Authorize(ctx, subject, action, resource, env)` call knows which relation to check:
+
+```go
+relStore := stores.NewMemoryRelationshipStore()
+relConfig := authz.NewRelationConfig().
+    Require("read", "document", "viewer", "editor", "owner").
+    Require("write", "document", "editor", "owner")
+
+engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore,
+    authz.WithRelationshipStore(relStore, relConfig),
+)
+
+ctx := context.Background()
+_ = relStore.WriteTuple(ctx, authz.RelationTuple{
+    ObjectType: "document", ObjectID: "123",
+    Relation:   "viewer",
+    SubjectType: "user", SubjectID: "alice",
+})
+
+decision, _ := engine.Authorize(ctx, &authz.Subject{ID: "alice", Type: "user", TenantID: "t1"},
+    "read", &authz.Resource{ID: "123", Type: "document", TenantID: "t1"},
+    &authz.Environment{TenantID: "t1"})
+// decision.Allowed == true, decision.Reason == "relationship allow"
+```
+
+`Engine.Authorize` checks the relationship store as one more allow step (after ACL/ABAC/RBAC/owner checks, before default deny) and records it in `Decision.Trace` the same way as the other paths, so `Engine.Explain` shows exactly why access was granted or denied. Revoking a tuple (`DeleteTuple`) takes effect on the next check.
+
+### Current scope and limitations
+
+This is a first, extensible step, not a full Zanzibar/SpiceDB implementation:
+
+- The only ready-made store is `stores.MemoryRelationshipStore` — an in-memory reference implementation with no persistence or distributed consistency guarantees. Production use requires a real backing store.
+- Only union of direct tuples and subject-set indirection is supported. There is no set-algebra (intersection, exclusion/subtraction) or SpiceDB-style computed-userset rewrite rules.
+- No wildcard/public subjects (e.g. `user:*`) and no negation.
+- Traversal depth is capped (10 hops) to bound cost and guarantee termination on cyclic graphs; deeply nested group hierarchies beyond that cap will not resolve.
 
 ## HTTP Route Permissions
 
