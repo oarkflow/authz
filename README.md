@@ -332,6 +332,24 @@ Use `WithOpenTelemetry` to enable metrics/tracing instrumentation. `Engine.GetCa
 
 Audit entries include subject, action, resource, decision, trace, and metadata. Use `GetAccessLog` for retrieval and `ReplayDecision` for replaying previous decisions.
 
+### Tamper-Evident Audit Trails
+
+Every `AuditEntry` carries `PrevHash` and `Hash` fields that form a per-tenant SHA-256 hash chain: each entry's `Hash` covers its own content plus the previous entry's `Hash`, so a direct DB `UPDATE`/`DELETE` on the audit table (bypassing the engine) breaks the chain from that point forward. The engine computes these fields automatically as entries are flushed to the configured `AuditStore` — no changes are required at call sites that construct `AuditEntry` values.
+
+Call `Engine.VerifyAuditChain(ctx, tenantID)` (or the standalone `authz.VerifyAuditChain(ctx, store, tenantID)` for a store not attached to an engine) to walk a tenant's entries in order and verify the chain. It returns a nil `*AuditChainBreak` when the chain is intact, or the first broken link — with the entry's index, ID, and the expected vs. actual hash — when tampering or deletion is detected:
+
+```go
+brk, err := engine.VerifyAuditChain(ctx, "tenant-1")
+if err != nil {
+    // store/query error
+}
+if brk != nil {
+    log.Printf("audit tampering detected at entry %s (index %d): %s", brk.EntryID, brk.Index, brk.Reason)
+}
+```
+
+This mirrors the ed25519-based signing pattern already used for policy config bundles (`config_sign.go`, `bundle_distributor.go`), but uses a lightweight SHA-256 hash chain since audit tamper-evidence only needs to detect mutation/deletion, not authenticate a distributing party.
+
 ## Testing And Benchmarks
 
 ```bash

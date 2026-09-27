@@ -723,6 +723,157 @@ type AuditEntry struct {
 	Decision  *Decision      `json:"decision"`
 	TraceID   string         `json:"trace_id,omitempty"`
 	Metadata  map[string]any `json:"metadata"`
+	// PrevHash is the Hash of the previous entry in this tenant's audit
+	// chain (empty for the first entry). Hash covers PrevHash plus this
+	// entry's own content, so any deletion, reordering, or mutation of a
+	// stored entry breaks the chain from that point forward.
+	PrevHash string `json:"prev_hash,omitempty"`
+	Hash     string `json:"hash,omitempty"`
+}
+
+// AuditEntryTenantID returns a best-effort tenant id for an audit entry,
+// preferring the resource's tenant then the subject's.
+func AuditEntryTenantID(entry *AuditEntry) string {
+	if entry == nil {
+		return ""
+	}
+	if entry.Resource != nil && entry.Resource.TenantID != "" {
+		return entry.Resource.TenantID
+	}
+	if entry.Subject != nil {
+		return entry.Subject.TenantID
+	}
+	return ""
+}
+
+func auditEntryTenantID(entry *AuditEntry) string {
+	return AuditEntryTenantID(entry)
+}
+
+// ComputeAuditEntryHash computes the SHA-256 hash-chain digest for entry,
+// covering the entry's own content plus the given previous-entry hash.
+// Exported so custom AuditStore implementations and tests can seal or
+// verify entries without depending on the engine.
+func ComputeAuditEntryHash(entry *AuditEntry, prevHash string) (string, error) {
+	return computeAuditEntryHash(entry, prevHash)
+}
+
+func computeAuditEntryHash(entry *AuditEntry, prevHash string) (string, error) {
+	payload := struct {
+		ID        string
+		Timestamp int64
+		Subject   *Subject
+		Action    Action
+		Resource  *Resource
+		Decision  *Decision
+		TraceID   string
+		Metadata  map[string]any
+		PrevHash  string
+	}{
+		ID:        entry.ID,
+		Timestamp: entry.Timestamp.UnixNano(),
+		Subject:   entry.Subject,
+		Action:    entry.Action,
+		Resource:  entry.Resource,
+		Decision:  entry.Decision,
+		TraceID:   entry.TraceID,
+		Metadata:  entry.Metadata,
+		PrevHash:  prevHash,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+// AuditChainBreak describes the first detected break in a tenant's audit
+// hash chain.
+type AuditChainBreak struct {
+	Index    int    `json:"index"`
+	EntryID  string `json:"entry_id"`
+	Reason   string `json:"reason"`
+	Expected string `json:"expected"`
+	Actual   string `json:"actual"`
+}
+
+func (b *AuditChainBreak) Error() string {
+	return fmt.Sprintf("audit chain broken at entry %q (index %d): %s", b.EntryID, b.Index, b.Reason)
+}
+
+// VerifyAuditChain walks a tenant's audit entries in stored order and
+// verifies the SHA-256 hash chain, returning the first broken link found
+// (if any). A nil AuditChainBreak with a nil error means the chain is
+// intact. entries must be supplied in the order they were originally
+// written (oldest first).
+func VerifyAuditChain(ctx context.Context, store AuditStore, tenantID string) (*AuditChainBreak, error) {
+	entries, err := fetchTenantAuditEntries(ctx, store, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return VerifyAuditEntryChain(entries), nil
+}
+
+// VerifyAuditEntryChain verifies an already-fetched, ordered slice of audit
+// entries and returns the first broken link found, or nil if the chain is
+// intact.
+func VerifyAuditEntryChain(entries []*AuditEntry) *AuditChainBreak {
+	prevHash := ""
+	for i, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		if entry.PrevHash != prevHash {
+			return &AuditChainBreak{
+				Index:    i,
+				EntryID:  entry.ID,
+				Reason:   "prev_hash does not match previous entry's hash",
+				Expected: prevHash,
+				Actual:   entry.PrevHash,
+			}
+		}
+		expected, err := computeAuditEntryHash(entry, prevHash)
+		if err != nil {
+			return &AuditChainBreak{
+				Index:   i,
+				EntryID: entry.ID,
+				Reason:  fmt.Sprintf("failed to recompute hash: %v", err),
+			}
+		}
+		if entry.Hash != expected {
+			return &AuditChainBreak{
+				Index:    i,
+				EntryID:  entry.ID,
+				Reason:   "hash does not match recomputed content hash",
+				Expected: expected,
+				Actual:   entry.Hash,
+			}
+		}
+		prevHash = entry.Hash
+	}
+	return nil
+}
+
+func fetchTenantAuditEntries(ctx context.Context, store AuditStore, tenantID string) ([]*AuditEntry, error) {
+	filter := AuditFilter{TenantID: tenantID, Limit: 1 << 30}
+	entries, err := store.GetAccessLog(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if tenantID != "" {
+		filtered := make([]*AuditEntry, 0, len(entries))
+		for _, e := range entries {
+			if auditEntryTenantID(e) == tenantID {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+	return entries, nil
 }
 
 // GetTraceID returns the trace id if set directly or inside Metadata["trace_id"].
@@ -744,6 +895,7 @@ func (a *AuditEntry) GetTraceID() string {
 
 // AuditFilter for querying audit logs
 type AuditFilter struct {
+	TenantID   string
 	SubjectID  string
 	ResourceID string
 	Action     Action
@@ -1467,6 +1619,10 @@ type Engine struct {
 	hotPathSeq atomic.Uint64
 	// observer for tracing/metrics (default NoopObserver)
 	observer Observer
+	// tamper-evidence: last hash written per tenant, used to chain new
+	// audit entries. Only mutated from the single audit-worker goroutine.
+	auditChainMu   sync.Mutex
+	auditChainLast map[string]string
 }
 
 type EngineOption func(*Engine) error
@@ -1553,6 +1709,7 @@ func NewEngine(
 		auditFlushInterval: 25 * time.Millisecond,
 		batchWorkerCount:   runtime.NumCPU(),
 		observer:           NoopObserver{},
+		auditChainLast:     make(map[string]string),
 	}
 
 	// init pools
@@ -2700,8 +2857,36 @@ func (e *Engine) startAuditWorker() {
 	}()
 }
 
+// sealAuditEntry computes and attaches the hash-chain fields for entry,
+// linking it to the last entry written for its tenant. It must only be
+// called from the single audit-worker goroutine so the chain stays
+// strictly ordered without needing a lock across the whole write.
+func (e *Engine) sealAuditEntry(entry *AuditEntry) {
+	if entry == nil || entry.Hash != "" {
+		return
+	}
+	tenant := auditEntryTenantID(entry)
+	e.auditChainMu.Lock()
+	prev := e.auditChainLast[tenant]
+	entry.PrevHash = prev
+	hash, err := computeAuditEntryHash(entry, prev)
+	if err != nil {
+		e.auditChainMu.Unlock()
+		if e.logger != nil {
+			e.logger.Error("failed to compute audit chain hash", "error", err, "id", entry.ID)
+		}
+		return
+	}
+	entry.Hash = hash
+	e.auditChainLast[tenant] = hash
+	e.auditChainMu.Unlock()
+}
+
 func (e *Engine) flushAuditBatch(batch []*AuditEntry) {
 	ctx := context.Background()
+	for _, entry := range batch {
+		e.sealAuditEntry(entry)
+	}
 	if bs, ok := e.auditStore.(BatchAuditStore); ok {
 		if err := bs.LogDecisions(ctx, batch); err == nil {
 			return
@@ -3100,6 +3285,13 @@ func (e *Engine) GetPolicyHistory(ctx context.Context, id string) ([]*Policy, er
 // GetAccessLog wrapper
 func (e *Engine) GetAccessLog(ctx context.Context, filter AuditFilter) ([]*AuditEntry, error) {
 	return e.auditStore.GetAccessLog(ctx, filter)
+}
+
+// VerifyAuditChain verifies the tamper-evident hash chain of this engine's
+// audit store for the given tenant, returning the first broken link found
+// (if any).
+func (e *Engine) VerifyAuditChain(ctx context.Context, tenantID string) (*AuditChainBreak, error) {
+	return VerifyAuditChain(ctx, e.auditStore, tenantID)
 }
 
 // Convenience wrappers for listing roles and policies

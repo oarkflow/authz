@@ -297,11 +297,29 @@ func (s *MemoryAuditStore) LogDecision(ctx context.Context, entry *authz.AuditEn
 	return nil
 }
 
+// DeleteEntry removes the audit entry with the given id, simulating a
+// direct tamper (e.g. a raw DB DELETE) so callers can verify that
+// VerifyAuditChain detects the resulting break.
+func (s *MemoryAuditStore) DeleteEntry(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, entry := range s.entries {
+		if entry.ID == id {
+			s.entries = append(s.entries[:i], s.entries[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
 func (s *MemoryAuditStore) GetAccessLog(ctx context.Context, filter authz.AuditFilter) ([]*authz.AuditEntry, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]*authz.AuditEntry, 0)
 	for _, entry := range s.entries {
+		if filter.TenantID != "" && authz.AuditEntryTenantID(entry) != filter.TenantID {
+			continue
+		}
 		if filter.SubjectID != "" && entry.Subject.ID != filter.SubjectID {
 			continue
 		}
