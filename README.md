@@ -115,6 +115,54 @@ Tenant owner checks support two paths:
 - `subject.Attrs["is_tenant_owner"] = true` grants owner-style access. If `subject.Attrs["owner_allowed_actions"]` is present, it limits owner access to those action names or wildcard patterns.
 - `Role.OwnerAllowedActions` limits what a role-level owner may do across descendant tenants. Patterns use the same suffix-wildcard behavior as regular actions.
 
+## Delegation & Break-Glass Access
+
+These are additive primitives for two enterprise IAM gaps: temporary hand-off of authority between subjects, and emergency access that must never be silently blocked. Both are opt-in and separate from the normal `Authorize` decision tree.
+
+### Delegation
+
+A `DelegationGrant` lets one subject (the delegator) hand a bounded set of actions on a resource pattern to another subject (the delegate) for a time-boxed window, optionally capped by a maximum number of uses:
+
+```go
+delegationStore := stores.NewMemoryDelegationStore()
+engine := authz.NewEngine(policyStore, roleStore, aclStore, auditStore,
+    authz.WithDelegationStore(delegationStore),
+)
+
+grant, err := engine.CreateDelegation(ctx,
+    alice,                          // delegator
+    bob,                            // delegate
+    []authz.Action{"read", "approve"},
+    "document:123",                 // or a pattern like "document:*"
+    time.Now(),                     // starts now
+    time.Now().Add(24*time.Hour),   // expires in 24h
+    5,                              // max uses, 0 = unlimited
+)
+```
+
+`CreateDelegation` refuses to create the grant unless the delegator is, right now, authorized for every action being delegated over the given resource pattern (checked via a normal `Engine.Authorize` call against the delegator). **A subject can never delegate a permission it does not itself have** — delegation forwards existing authority, it does not amplify it. This check runs at grant-creation time only: if the delegator's own authorization is revoked afterwards, previously issued grants are not automatically invalidated, so revoke them explicitly with `RevokeDelegation` when that matters.
+
+Once created, `Engine.Authorize` honors a delegation as an additional allow path (alongside ACLs, RBAC, ABAC policies, and owner rules): a request from the delegate is allowed if a matching, non-revoked grant is active — i.e. its start time has passed, it has not expired, and it has not exceeded `MaxUses`. `Decision.Reason` is `"delegation allow"` and `Decision.MatchedBy` carries the grant ID for audit purposes.
+
+`Engine.RevokeDelegation(ctx, revoker, delegationID)` revokes a grant immediately (only the original delegator or a cross-tenant admin may do so), invalidating the decision cache so the change takes effect on the very next check.
+
+### Break-Glass / Emergency Access
+
+`Engine.AuthorizeBreakGlass(ctx, subject, action, resource, env, justification)` is a deliberately separate method from `Authorize` — it is never triggered implicitly, so emergency access can't be invoked by accident. It **always allows the request** (fail-open by design, for genuine emergencies) but:
+
+- requires a non-empty `justification` string, returning an error if one is not supplied;
+- records the action on the audit trail as the distinct `authz.BreakGlassAction` (`"breakglass.invoke"`) rather than the original action, so break-glass usage can be filtered and alerted on independently;
+- flags `Decision.Reason` and `Decision.Trace` clearly as a break-glass override;
+- writes a high-visibility `AuditEntry` synchronously to the configured `AuditStore` (bypassing the normal best-effort async batch channel, so the entry is never silently dropped) with `Metadata["break_glass"] = true`, `Metadata["flagged"] = "HIGH_VISIBILITY_BREAK_GLASS"`, `Metadata["justification"]`, and `Metadata["original_action"]`;
+- emits a structured error-level log line for immediate operational visibility.
+
+```go
+decision, err := engine.AuthorizeBreakGlass(ctx, oncallEngineer, "delete", resource, env,
+    "production incident INC-4821, need emergency delete to unblock rollback")
+```
+
+Because break-glass access always succeeds, treat every invocation as an incident: alert on `authz.BreakGlassAction` entries in the audit log and require the justification field to be reviewed post-hoc.
+
 ## HTTP Route Permissions
 
 HTTP route authorization uses the normal engine model with a route-specific resource convention:

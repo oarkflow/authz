@@ -1508,6 +1508,7 @@ type Engine struct {
 	attrProviders       []AttributeProvider
 	roleMembershipStore RoleMembershipStore
 	bundleDistributor   *PolicyBundleDistributor
+	delegationStore     DelegationStore
 	// attribute cache for external providers
 	attrCache    map[string]*attrCacheEntry
 	attrCacheMu  sync.RWMutex
@@ -1893,6 +1894,26 @@ func (e *Engine) authorizeInternal(ctx context.Context, subject *Subject, action
 				}
 				decision.Trace = append(decision.Trace, fmt.Sprintf("   ALLOW by ACL: %s", aid))
 			}
+		}
+		ck := e.buildCacheKey(subject, action, resource, env)
+		e.setDecisionInCache(ck, decision)
+		e.auditLog(ctx, subject, action, resource, decision)
+		return decision, nil
+	}
+
+	// 2.5 Delegation Allow (time-boxed grant from an authorized subject)
+	if includeTrace {
+		decision.Trace = append(decision.Trace, "2.5 Checking delegation allow...")
+	}
+	if allowed, delegationID, delTrace := e.checkDelegation(ctx, subject, resource, action, env.Time); allowed {
+		decision.Allowed = true
+		decision.Reason = "delegation allow"
+		decision.MatchedBy = delegationID
+		if includeTrace {
+			for _, t := range delTrace {
+				decision.Trace = append(decision.Trace, fmt.Sprintf("   %s", t))
+			}
+			decision.Trace = append(decision.Trace, fmt.Sprintf("   ALLOW by delegation: %s", delegationID))
 		}
 		ck := e.buildCacheKey(subject, action, resource, env)
 		e.setDecisionInCache(ck, decision)
