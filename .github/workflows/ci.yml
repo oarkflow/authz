@@ -50,7 +50,6 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Run govulncheck
-        continue-on-error: true
         run: govulncheck ./...
 
   gosec:
@@ -67,7 +66,7 @@ jobs:
       - name: Run gosec
         uses: securego/gosec@master
         with:
-          args: -exclude-dir=vscode-authz -no-fail ./...
+          args: -exclude-dir=vscode-authz ./...
 
   build:
     name: Build
