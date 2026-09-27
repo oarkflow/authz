@@ -324,6 +324,47 @@ engine.SetBundleDistributor(dist)
 
 Use this for multi-engine deployments where policy changes need to propagate without process restarts.
 
+### Staleness in multi-instance deployments
+
+By default `RegisterSubscriber`/`NotifyPolicyChange` only fan bundles out to
+subscribers registered *in the same process*. If you run multiple replicas
+of your service, each with its own `Engine` and its own decision/role/
+compiled-condition caches, a policy change applied through one replica's
+`PolicyBundleDistributor` is invisible to the others until something else
+forces them to reload from the shared `PolicyStore` (a restart, your own
+out-of-band trigger, or the distributor's `rotationInterval` ticker firing).
+In practice that staleness window is unbounded unless you wire up your own
+cross-replica signal.
+
+To bound it, configure a `BundleTransport` with `WithBundleTransport` so the
+distributor also broadcasts bundles across processes. `contrib/redistransport`
+provides a Redis Pub/Sub implementation built on the same `go-redis/v9`
+client used elsewhere in `contrib`:
+
+```go
+import "github.com/oarkflow/authz/contrib/redistransport"
+
+client := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+transport := redistransport.New(client) // or redistransport.New(client, redistransport.WithChannel("myapp:bundles"))
+
+dist, _ := authz.NewPolicyBundleDistributor(policyStore, authz.WithBundleTransport(transport))
+dist.RegisterSubscriber("tenant-1", authz.BundleSubscriberFunc(func(ctx context.Context, tenant string, pub ed25519.PublicKey, bundle *authz.SignedPolicyBundle) error {
+	return engine.ApplySignedBundle(ctx, pub, bundle)
+}))
+dist.Start(context.Background())
+engine.SetBundleDistributor(dist)
+```
+
+Every replica that starts a distributor configured with a transport pointed
+at the same Redis channel receives bundles published by any other replica,
+redispatches them to its own local subscribers, and (via
+`Engine.ApplySignedBundle` -> `ReloadPolicies` -> `InvalidateDecisionCache`)
+invalidates its local caches — typically within a single Redis round-trip
+instead of waiting for the next scheduled reload. This remains best-effort,
+at-most-once delivery: a replica that is offline when a bundle is published
+stays stale until it reconnects and receives a later bundle, or reloads
+through some other path.
+
 ## Observability
 
 Use `WithLogger` and `WithTraceIDFunc` to plug in application logging and trace IDs.
