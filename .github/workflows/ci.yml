@@ -37,6 +37,9 @@ jobs:
           cache: true
       - name: Run tests
         run: go test ./... -count=1 -timeout 120s -race
+      - name: Run contrib tests (store conformance suite incl. SQL/SQLite)
+        working-directory: contrib
+        run: go test ./... -count=1 -timeout 120s -race
 
   govulncheck:
     name: Vulnerability Check

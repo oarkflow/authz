@@ -91,11 +91,17 @@ func (s *SQLRoleStore) ListRoles(ctx context.Context, tenantID string) ([]*authz
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
-	out := make([]*authz.Role, 0)
+	ids := make([]string, 0)
 	for r.Next() {
 		var id string
 		_ = r.Scan(&id)
+		ids = append(ids, id)
+	}
+	r.Close()
+	// fetch each role after closing the listing query: some drivers (e.g. SQLite)
+	// don't support a second query on the same connection while rows are open.
+	out := make([]*authz.Role, 0, len(ids))
+	for _, id := range ids {
 		if rr, err := s.GetRole(ctx, id); err == nil {
 			out = append(out, rr)
 		}

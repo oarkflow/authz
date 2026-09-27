@@ -199,11 +199,17 @@ func (s *SQLPolicyStore) ListPolicies(ctx context.Context, tenantID string) ([]*
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
-	out := make([]*authz.Policy, 0)
+	ids := make([]string, 0)
 	for r.Next() {
 		var id string
 		_ = r.Scan(&id)
+		ids = append(ids, id)
+	}
+	r.Close()
+	// fetch each policy after closing the listing query: some drivers (e.g. SQLite)
+	// don't support a second query on the same connection while rows are open.
+	out := make([]*authz.Policy, 0, len(ids))
+	for _, id := range ids {
 		if p, err := s.GetPolicy(ctx, id); err == nil {
 			out = append(out, p)
 		}
