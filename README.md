@@ -236,11 +236,39 @@ See [DSL.md](./DSL.md), [DSL_QUICKSTART.md](./DSL_QUICKSTART.md), and [examples/
 Embed the base admin server when you need a control plane:
 
 ```go
-admin := authz.NewAdminHTTPServer(engine, authz.WithAdminAuth(func(r *http.Request) error {
+admin, err := authz.NewAdminHTTPServer(engine, authz.WithAdminAuth(func(r *http.Request) error {
 	return nil
 }))
+if err != nil {
+	log.Fatal(err)
+}
 go admin.Start(":8081")
 ```
+
+### Fail-closed authentication
+
+`NewAdminHTTPServer` requires authentication by default. If you don't pass `WithAdminAuth(...)`,
+the constructor refuses to start the server and returns `authz.ErrAdminAuthNotConfigured`
+instead of silently serving the tenant/policy/role/ACL/explain/batch endpoints unauthenticated.
+
+If you genuinely want to run without authentication — local development, tests, or when
+authentication is enforced by an upstream reverse proxy — opt in explicitly:
+
+```go
+admin, err := authz.NewAdminHTTPServer(engine, authz.WithAdminAuthDisabled())
+```
+
+`WithAdminAuthDisabled()` logs a warning on every startup as a reminder that the control
+plane is unauthenticated. `WithAdminAuth` and `WithAdminAuthDisabled` are mutually exclusive
+in intent; providing `WithAdminAuth` is always the safer choice for anything beyond local use.
+
+### Default rate limiting
+
+If you don't configure `WithAdminRateLimiter(...)`, the admin server automatically applies a
+conservative default token-bucket rate limiter (`authz.DefaultRateLimiterConfig()`, currently
+10 requests/second per client with a burst of 20) so the control plane always has baseline DoS
+protection. Pass `WithAdminRateLimiter(cfg)` with your own `*authz.RateLimiterConfig` to
+override it.
 
 Base endpoints:
 
