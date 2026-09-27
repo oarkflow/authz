@@ -322,6 +322,28 @@ IAM model additions include:
 - `Invitation` lifecycle with pending, accepted, expired, and revoked states.
 - `PermissionResolver` for effective permissions from roles, ACLs, policies, and optional permission boundaries.
 
+## Compliance
+
+`gdpr.go` provides `EraseSubjectData` for GDPR "right to erasure" (Art. 17) requests. It sweeps every store that may hold data about a subject and removes or anonymizes what it finds:
+
+```go
+report, err := authz.EraseSubjectData(ctx, authz.ErasureDeps{
+	UserStore:            userStore,
+	SessionStore:         sessionStore,
+	APIKeyStore:          apiKeyStore,
+	RoleMembershipStore:  roleMembershipStore,
+	ACLStore:             aclStore,
+	GroupMembershipStore: groupMembershipStore,
+	InvitationStore:      invitationStore,
+	ServiceAccountStore:  serviceAccountStore,
+	AuditStore:           auditStore,
+}, tenantID, subjectID)
+```
+
+Every field on `ErasureDeps` is optional and nil-safe: only wire up the stores your deployment actually uses, and any store left `nil` is skipped rather than treated as an error. `EraseSubjectData` deletes the user record, sessions, API keys, role memberships, ACL entries naming the subject, and group memberships; anonymizes invitations addressed to the subject's email and service accounts the subject created; and returns an `*ErasureReport` summarizing counts per store plus any per-store errors (a partial erasure still returns a populated report alongside a non-nil error).
+
+**Audit log tradeoff:** audit entries are never deleted by `EraseSubjectData`, even for the erased subject. Audit stores in this project are moving towards tamper-evident, hash-chained storage, so deleting or bulk-rewriting historical entries would break chain integrity and destroy the forensic value of the log. Instead, the subject identifier inside each historical `AuditEntry` is overwritten with an anonymized placeholder, preserving the shape and chain of the log while removing the personally identifying value. The erasure operation itself is also logged as a new audit event under the action `gdpr.erase` (when an `AuditStore` is supplied), so there is a durable record that erasure occurred.
+
 ## Policy Bundles
 
 `PolicyBundleDistributor` signs policy bundles with Ed25519 keys and pushes tenant-specific bundles to subscribers:
