@@ -12,7 +12,7 @@ import (
 	"github.com/oarkflow/authz/pkg/stores"
 )
 
-func mai1n() {
+func main() {
 	fmt.Println("=== AuthZ Custom DSL Demo ===")
 
 	// Example 1: Parse DSL

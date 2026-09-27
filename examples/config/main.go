@@ -11,7 +11,7 @@ import (
 	"github.com/oarkflow/authz/pkg/stores"
 )
 
-func mai3n() {
+func main() {
 	// Example 1: Build configuration programmatically
 	buildConfigExample()
 

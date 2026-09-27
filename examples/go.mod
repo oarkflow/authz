@@ -4,6 +4,8 @@ go 1.26.2
 
 replace github.com/oarkflow/authz => ../
 
+replace github.com/oarkflow/authz/contrib => ../contrib
+
 require (
 	github.com/oarkflow/authz v0.0.0-00010101000000-000000000000
 	github.com/oarkflow/fh v0.0.13

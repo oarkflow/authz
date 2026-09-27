@@ -10,7 +10,7 @@ import (
 	"github.com/oarkflow/authz/pkg/stores"
 )
 
-func mai6n() {
+func main() {
 	ctx := context.Background()
 
 	// Initialize stores (in-memory for example)

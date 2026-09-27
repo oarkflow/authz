@@ -12,7 +12,7 @@ import (
 	"github.com/oarkflow/authz/pkg/stores"
 )
 
-func mai4n() {
+func main() {
 	ctx := context.Background()
 
 	policyStore := stores.NewMemoryPolicyStore()
