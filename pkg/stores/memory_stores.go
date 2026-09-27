@@ -186,18 +186,18 @@ func (s *MemoryACLStore) rebuildACLSnapshot() {
 
 func (s *MemoryACLStore) GrantACL(ctx context.Context, acl *authz.ACL) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	acl.CreatedAt = time.Now()
 	s.acls[acl.ID] = acl
-	go s.rebuildACLSnapshot()
+	s.mu.Unlock()
+	s.rebuildACLSnapshot()
 	return nil
 }
 
 func (s *MemoryACLStore) RevokeACL(ctx context.Context, id string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.acls, id)
-	go s.rebuildACLSnapshot()
+	s.mu.Unlock()
+	s.rebuildACLSnapshot()
 	return nil
 }
 
@@ -213,12 +213,13 @@ func (s *MemoryACLStore) GetACL(ctx context.Context, id string) (*authz.ACL, err
 
 func (s *MemoryACLStore) UpdateACL(ctx context.Context, acl *authz.ACL) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if _, ok := s.acls[acl.ID]; !ok {
+		s.mu.Unlock()
 		return fmt.Errorf("acl not found: %s", acl.ID)
 	}
 	s.acls[acl.ID] = acl
-	go s.rebuildACLSnapshot()
+	s.mu.Unlock()
+	s.rebuildACLSnapshot()
 	return nil
 }
 
@@ -374,23 +375,28 @@ func (m *MemoryRoleMembershipStore) rebuildMembershipSnapshot() {
 
 func (m *MemoryRoleMembershipStore) AssignRole(ctx context.Context, subjectID, roleID string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.store[subjectID]; !ok {
 		m.store[subjectID] = make(map[string]bool)
 	}
 	m.store[subjectID][roleID] = true
-	go m.rebuildMembershipSnapshot()
+	m.mu.Unlock()
+	// Rebuilt synchronously (not via a background goroutine) so a ListRoles
+	// call immediately after AssignRole/RevokeRole observes the write —
+	// the periodic snapshotWorker ticker still runs to catch external
+	// store mutations, this just removes the read-your-writes race.
+	m.rebuildMembershipSnapshot()
 	return nil
 }
 
 func (m *MemoryRoleMembershipStore) RevokeRole(ctx context.Context, subjectID, roleID string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if _, ok := m.store[subjectID]; !ok {
+		m.mu.Unlock()
 		return nil
 	}
 	delete(m.store[subjectID], roleID)
-	go m.rebuildMembershipSnapshot()
+	m.mu.Unlock()
+	m.rebuildMembershipSnapshot()
 	return nil
 }
 
