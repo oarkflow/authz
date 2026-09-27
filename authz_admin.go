@@ -57,6 +57,7 @@ type AdminHTTPServer struct {
 	rateLimiter        *RateLimiter
 	contentTypeCfg     *ContentTypeConfig
 	maxBodySize        int64
+	authDisabled       bool
 }
 
 // AdminAuthFunc allows callers to enforce authentication/authorization on admin endpoints.
@@ -65,11 +66,27 @@ type AdminAuthFunc func(r *http.Request) error
 // AdminHTTPOption configures the admin HTTP server.
 type AdminHTTPOption func(*AdminHTTPServer)
 
+// ErrAdminAuthNotConfigured is returned by NewAdminHTTPServer when neither WithAdminAuth
+// nor WithAdminAuthDisabled was provided. The admin control plane refuses to start
+// unauthenticated by default; callers must either configure auth or explicitly opt out.
+var ErrAdminAuthNotConfigured = errors.New("authz: admin HTTP server requires WithAdminAuth (or explicit WithAdminAuthDisabled) to start")
+
 // WithAdminAuth installs a custom authentication callback.
-// If not provided, the server will warn and require auth by default.
+// Either this or WithAdminAuthDisabled() must be supplied, or NewAdminHTTPServer
+// returns an error rather than serving unauthenticated endpoints.
 func WithAdminAuth(fn AdminAuthFunc) AdminHTTPOption {
 	return func(s *AdminHTTPServer) {
 		s.authFn = fn
+	}
+}
+
+// WithAdminAuthDisabled explicitly opts out of admin authentication. Use only for
+// local development, tests, or when authentication is enforced upstream (e.g. by a
+// reverse proxy). Without this option, NewAdminHTTPServer fails closed when no
+// AdminAuthFunc is configured via WithAdminAuth.
+func WithAdminAuthDisabled() AdminHTTPOption {
+	return func(s *AdminHTTPServer) {
+		s.authDisabled = true
 	}
 }
 
@@ -137,9 +154,13 @@ func WithAdminMaxBodySize(maxBytes int64) AdminHTTPOption {
 }
 
 // NewAdminHTTPServer wires handlers for managing policies, roles, batch decisions, and explanations.
-// Security middleware is automatically applied. Admin authentication is required by default;
-// a warning is logged if no auth function is provided.
-func NewAdminHTTPServer(engine *Engine, opts ...AdminHTTPOption) *AdminHTTPServer {
+// Security middleware is automatically applied. Admin authentication is required by default:
+// if no AdminAuthFunc is configured via WithAdminAuth, the server fails closed and returns
+// ErrAdminAuthNotConfigured instead of silently serving unauthenticated endpoints. Callers
+// that genuinely want no authentication (e.g. local development, or auth enforced upstream)
+// must opt in explicitly via WithAdminAuthDisabled(). A conservative default rate limiter is
+// applied when the caller does not configure one via WithAdminRateLimiter.
+func NewAdminHTTPServer(engine *Engine, opts ...AdminHTTPOption) (*AdminHTTPServer, error) {
 	if engine == nil {
 		panic("engine is required")
 	}
@@ -152,15 +173,23 @@ func NewAdminHTTPServer(engine *Engine, opts ...AdminHTTPOption) *AdminHTTPServe
 		opt(server)
 	}
 
-	// Warn if no auth function is provided
+	if server.authFn == nil && !server.authDisabled {
+		return nil, ErrAdminAuthNotConfigured
+	}
 	if server.authFn == nil {
-		log.Println("[WARN] AdminHTTPServer: no authentication configured via WithAdminAuth(). " +
-			"This is a security risk. Consider adding authentication for production use.")
+		log.Println("[WARN] AdminHTTPServer: authentication explicitly disabled via WithAdminAuthDisabled(). " +
+			"This is a security risk. Do not use in production without an upstream authentication layer.")
+	}
+
+	// Apply a conservative default rate limiter when none was configured, so the admin
+	// API always has at least basic DoS protection out of the box.
+	if server.rateLimiter == nil {
+		server.rateLimiter = NewRateLimiter(DefaultRateLimiterConfig())
 	}
 
 	server.routes()
 	server.buildHandler()
-	return server
+	return server, nil
 }
 
 func (s *AdminHTTPServer) buildHandler() {

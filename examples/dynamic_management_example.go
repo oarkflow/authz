@@ -29,7 +29,10 @@ func mai2n() {
 	)
 
 	// 2. Start Admin HTTP Server
-	server := authz.NewAdminHTTPServer(engine)
+	server, err := authz.NewAdminHTTPServer(engine, authz.WithAdminAuthDisabled())
+	if err != nil {
+		log.Fatalf("failed to create admin server: %v", err)
+	}
 	addr := ":8081"
 	go func() {
 		log.Printf("Starting admin server on %s", addr)

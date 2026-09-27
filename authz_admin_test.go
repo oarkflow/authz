@@ -2,6 +2,7 @@ package authz_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,9 +28,80 @@ func newEmptyEngine(t *testing.T) *authz.Engine {
 	)
 }
 
+func newTestAdminServer(t *testing.T, engine *authz.Engine, opts ...authz.AdminHTTPOption) *authz.AdminHTTPServer {
+	t.Helper()
+	opts = append(opts, authz.WithAdminAuthDisabled())
+	server, err := authz.NewAdminHTTPServer(engine, opts...)
+	if err != nil {
+		t.Fatalf("new admin server: %v", err)
+	}
+	return server
+}
+
+func TestAdminHTTPServerRefusesToStartWithoutAuth(t *testing.T) {
+	engine := newEmptyEngine(t)
+	server, err := authz.NewAdminHTTPServer(engine)
+	if err == nil {
+		t.Fatal("expected error when no auth is configured, got nil")
+	}
+	if !errors.Is(err, authz.ErrAdminAuthNotConfigured) {
+		t.Fatalf("expected ErrAdminAuthNotConfigured, got %v", err)
+	}
+	if server != nil {
+		t.Fatal("expected nil server on failure")
+	}
+}
+
+func TestAdminHTTPServerStartsWithAdminAuth(t *testing.T) {
+	engine := newEmptyEngine(t)
+	server, err := authz.NewAdminHTTPServer(engine, authz.WithAdminAuth(func(r *http.Request) error {
+		return nil
+	}))
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected non-nil server")
+	}
+}
+
+func TestAdminHTTPServerStartsWithAuthExplicitlyDisabled(t *testing.T) {
+	engine := newEmptyEngine(t)
+	server, err := authz.NewAdminHTTPServer(engine, authz.WithAdminAuthDisabled())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if server == nil {
+		t.Fatal("expected non-nil server")
+	}
+}
+
+func TestAdminHTTPServerDefaultRateLimiterApplied(t *testing.T) {
+	engine := newEmptyEngine(t)
+	server := newTestAdminServer(t, engine)
+
+	// The default limiter is conservative (burst 20); hammering the same
+	// client beyond that should eventually trip a 429 even though no
+	// WithAdminRateLimiter option was provided.
+	var lastCode int
+	for i := 0; i < 50; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+		req.RemoteAddr = "203.0.113.5:1234"
+		resp := httptest.NewRecorder()
+		server.ServeHTTP(resp, req)
+		lastCode = resp.Code
+		if lastCode == http.StatusTooManyRequests {
+			break
+		}
+	}
+	if lastCode != http.StatusTooManyRequests {
+		t.Fatalf("expected default rate limiter to eventually return 429, last status was %d", lastCode)
+	}
+}
+
 func TestAdminHTTPServerPolicyCreate(t *testing.T) {
 	engine := newEmptyEngine(t)
-	server := authz.NewAdminHTTPServer(engine)
+	server := newTestAdminServer(t, engine)
 	body := `{"id":"admin-policy","effect":"allow","actions":["read"],"resources":["document:*"],"condition":"","priority":1}`
 	req := httptest.NewRequest(http.MethodPost, "/tenants/tenant-admin/policies", strings.NewReader(body))
 	resp := httptest.NewRecorder()
@@ -63,7 +135,7 @@ func TestAdminHTTPServerExplainEndpoint(t *testing.T) {
 	if err := engine.ReloadPolicies(context.Background(), "tenant-admin"); err != nil {
 		t.Fatalf("reload policies: %v", err)
 	}
-	server := authz.NewAdminHTTPServer(engine)
+	server := newTestAdminServer(t, engine)
 	body := `{"subject_id":"alice","action":"read","resource":"document:42"}`
 	req := httptest.NewRequest(http.MethodPost, "/tenants/tenant-admin/explain", strings.NewReader(body))
 	resp := httptest.NewRecorder()
@@ -75,7 +147,7 @@ func TestAdminHTTPServerExplainEndpoint(t *testing.T) {
 
 func TestAdminHTTPServerTenantCreate(t *testing.T) {
 	engine := newEmptyEngine(t)
-	server := authz.NewAdminHTTPServer(engine)
+	server := newTestAdminServer(t, engine)
 	body := `{"id":"new-tenant","name":"New Tenant"}`
 	req := httptest.NewRequest(http.MethodPost, "/tenants", strings.NewReader(body))
 	resp := httptest.NewRecorder()
@@ -96,7 +168,7 @@ func TestAdminHTTPServerTenantCreate(t *testing.T) {
 
 func TestAdminHTTPServerACLCreate(t *testing.T) {
 	engine := newEmptyEngine(t)
-	server := authz.NewAdminHTTPServer(engine)
+	server := newTestAdminServer(t, engine)
 
 	body := `{"id":"acl-1","resource_id":"doc:1","subject_id":"user:1","actions":["read"],"effect":"allow"}`
 	req := httptest.NewRequest(http.MethodPost, "/tenants/t1/acls", strings.NewReader(body))
@@ -118,7 +190,7 @@ func TestAdminHTTPServerACLCreate(t *testing.T) {
 
 func TestAdminHTTPServerMemberAssign(t *testing.T) {
 	engine := newEmptyEngine(t)
-	server := authz.NewAdminHTTPServer(engine)
+	server := newTestAdminServer(t, engine)
 
 	// Assign role
 	body := `{"role_id":"role-1"}`
