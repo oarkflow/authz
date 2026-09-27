@@ -26,21 +26,30 @@ func (s *MemoryPolicyStore) CreatePolicy(ctx context.Context, p *authz.Policy) e
 	defer s.mu.Unlock()
 	p.CreatedAt = time.Now()
 	p.UpdatedAt = p.CreatedAt
-	s.policies[p.ID] = p
+	// Store a copy so later in-place mutation of the caller's *Policy (a
+	// common pattern: fetch, mutate fields, call UpdatePolicy) can't corrupt
+	// the stored state or retroactively taint history snapshots below.
+	cop := *p
+	s.policies[p.ID] = &cop
 	return nil
 }
 
+// UpdatePolicy stores the new policy state and appends the pre-update
+// snapshot to the per-policy history, mirroring the SQL policy store's
+// insertPolicyHistory/GetPolicyHistory contract (see
+// contrib/sqldriver/sql_policy_store.go). Version bumping is the caller's
+// (Engine.UpdatePolicy's) responsibility, so this only records history and
+// timestamps; it does not mutate p.Version itself.
 func (s *MemoryPolicyStore) UpdatePolicy(ctx context.Context, p *authz.Policy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	old, ok := s.policies[p.ID]
 	if ok {
-		cop := *old
-		s.histories[p.ID] = append(s.histories[p.ID], &cop)
+		s.histories[p.ID] = append(s.histories[p.ID], old)
 	}
 	p.UpdatedAt = time.Now()
-	p.Version++
-	s.policies[p.ID] = p
+	cop := *p
+	s.policies[p.ID] = &cop
 	return nil
 }
 
@@ -51,7 +60,12 @@ func (s *MemoryPolicyStore) GetPolicyHistory(ctx context.Context, id string) ([]
 	if !ok {
 		return nil, fmt.Errorf("no history for policy %s", id)
 	}
-	return h, nil
+	out := make([]*authz.Policy, len(h))
+	for i, p := range h {
+		cop := *p
+		out[i] = &cop
+	}
+	return out, nil
 }
 
 func (s *MemoryPolicyStore) DeletePolicy(ctx context.Context, id string) error {
@@ -68,7 +82,8 @@ func (s *MemoryPolicyStore) GetPolicy(ctx context.Context, id string) (*authz.Po
 	if !ok {
 		return nil, fmt.Errorf("policy not found: %s", id)
 	}
-	return p, nil
+	cop := *p
+	return &cop, nil
 }
 
 func (s *MemoryPolicyStore) ListPolicies(ctx context.Context, tenantID string) ([]*authz.Policy, error) {
@@ -77,7 +92,8 @@ func (s *MemoryPolicyStore) ListPolicies(ctx context.Context, tenantID string) (
 	result := make([]*authz.Policy, 0)
 	for _, p := range s.policies {
 		if tenantID == "" || p.TenantID == tenantID || p.TenantID == "" {
-			result = append(result, p)
+			cop := *p
+			result = append(result, &cop)
 		}
 	}
 	return result, nil
