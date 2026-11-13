@@ -1691,6 +1691,12 @@ type Engine struct {
 	// audit entries. Only mutated from the single audit-worker goroutine.
 	auditChainMu   sync.Mutex
 	auditChainLast map[string]string
+	// Lifecycle of the audit worker. auditMu orders sends on auditCh against
+	// closing it (a send on a closed channel panics); auditDone is closed by the
+	// worker once it has flushed everything and exited.
+	auditMu   sync.RWMutex
+	auditShut bool
+	auditDone chan struct{}
 }
 
 type EngineOption func(*Engine) error
@@ -1773,6 +1779,7 @@ func NewEngine(
 		logger:             logger.NewSLogLogger(nil),
 		traceIDFunc:        func() string { return GenerateSecureID("trace") },
 		auditCh:            make(chan AuditEntry, 4096),
+		auditDone:          make(chan struct{}),
 		auditBatchSize:     64,
 		auditFlushInterval: 25 * time.Millisecond,
 		batchWorkerCount:   runtime.NumCPU(),
@@ -2846,10 +2853,33 @@ func (e *Engine) auditLog(_ context.Context, subject *Subject, action Action, re
 		)
 	}
 
-	select {
-	case e.auditCh <- entry:
-	default:
+	// After Close the engine still answers, but nothing is logged: the worker
+	// has gone and the store may already be closed.
+	e.auditMu.RLock()
+	if !e.auditShut {
+		select {
+		case e.auditCh <- entry:
+		default:
+		}
 	}
+	e.auditMu.RUnlock()
+}
+
+// Close stops the audit worker. Entries already queued are written to the
+// audit store before Close returns, so a caller may close the store right
+// after it. Close is safe to call more than once and from several goroutines.
+// An engine that is never closed keeps its worker for the life of the process,
+// which is the right behaviour for a long-lived engine and a leak for one that
+// is created per test or per request.
+func (e *Engine) Close() error {
+	e.auditMu.Lock()
+	if !e.auditShut {
+		e.auditShut = true
+		close(e.auditCh)
+	}
+	e.auditMu.Unlock()
+	<-e.auditDone
+	return nil
 }
 
 // BatchAuthorize evaluates multiple authorization requests, fan-out dynamically, and reuses cache hits.
@@ -2962,6 +2992,7 @@ func (e *Engine) startAuditWorker() {
 	flushInterval := e.auditFlushInterval
 	e.configMu.Unlock()
 	go func() {
+		defer close(e.auditDone)
 		ticker := time.NewTicker(flushInterval)
 		defer ticker.Stop()
 		batch := make([]*AuditEntry, 0, batchSize)
